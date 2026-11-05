@@ -1,0 +1,5 @@
+{
+  "_help": "Where updates come from. An empty repo switches updates off.",
+  "repo": "SnookC/olympus-world",
+  "branch": "main"
+}

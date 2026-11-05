@@ -1,0 +1,12 @@
+{
+  "_help": "Edit with Notepad if you want. Restart the world after changing anything.",
+  "port": 8788,
+  "ollama_url": "http://127.0.0.1:11434",
+  "local_model": "qwen2.5:7b",
+  "gemini_model": "gemini-2.5-flash-lite",
+  "gemini_daily_cap": 20,
+  "web_daily_cap": 30,
+  "think_pause_seconds": 3,
+  "real_minutes_per_game_day": 60,
+  "world_half_size": 40
+}

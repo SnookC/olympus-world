@@ -1,0 +1,7 @@
+data/
+backups/
+config/secrets.env
+python_path.txt
+__pycache__/
+*.pyc
+installer/*.exe

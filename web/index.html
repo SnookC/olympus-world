@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympus World</title>
+<link rel="icon" href="icon-256.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="scene"></div>
+
+<header id="hud">
+  <div class="brand">OLYMPUS</div>
+  <div id="clock">Day 1 · 08:00</div>
+  <div id="status" class="status">Waking up…</div>
+</header>
+
+<div id="error" class="error" hidden></div>
+
+<section id="godcard" hidden>
+  <button id="godclose" class="x" title="Stop following">×</button>
+  <div class="godhead"><span id="gdot" class="dot"></span><div><div id="gname" class="gname"></div><div id="gtitle" class="gtitle"></div></div></div>
+  <div class="row"><span class="lbl">Doing</span><span id="gstatus"></span></div>
+  <div class="row"><span class="lbl">Energy</span><span class="bar"><span id="genergy"></span></span></div>
+  <div class="row col"><span class="lbl">Goal</span><span id="ggoal" class="val"></span></div>
+  <div class="row col"><span class="lbl">Thinking</span><span id="gthought" class="val quote"></span></div>
+  <div class="row col" id="gprojrow"><span class="lbl">Project</span><span id="gproject" class="val"></span></div>
+  <div class="row col" id="gselfrow"><span class="lbl">Who they're becoming</span><span id="gsummary" class="val"></span></div>
+  <div id="ginterests" class="chips small"></div>
+</section>
+
+<aside id="panel">
+  <div class="panelhead">
+    <div id="usage" class="usage"></div>
+    <button id="updbtn" class="btn upd" hidden>Update</button>
+    <button id="pause" class="btn">Pause</button>
+  </div>
+  <div id="filters" class="chips"></div>
+  <nav class="tabs" role="tablist">
+    <button data-tab="events" class="on">Live</button>
+    <button data-tab="diaries">Diaries</button>
+    <button data-tab="searches">Web</button>
+    <button data-tab="talks">Talk</button>
+    <button data-tab="places">Places</button>
+    <button data-tab="inventions">Inventions</button>
+  </nav>
+  <div id="feed" class="feed"></div>
+</aside>
+
+<div id="updmodal" class="modal" hidden>
+  <div class="sheet">
+    <div class="brand">UPDATE</div>
+    <h2 id="updtitle">Olympus World</h2>
+    <p id="updnotes" class="notes"></p>
+    <p class="fine">Their world, memories, your settings and your Gemini key are kept. The files being replaced are backed up first, and if anything goes wrong the old version is put back. The world restarts by itself in a few seconds.</p>
+    <div id="updlog" class="updlog" hidden></div>
+    <div class="row end"><button id="updlater" class="btn">Later</button><button id="updgo" class="btn on">Update now</button></div>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
