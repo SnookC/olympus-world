@@ -23,6 +23,7 @@ MAX_PART_HEIGHT_POS = 40.0
 MAX_PART_OFFSET = 30.0
 MAX_PARTS_PER_BUILD = 20
 MAX_PARTS_PER_PROJECT = 120
+MAX_PARTS_PER_PLACE = 150    # a place this big is FINISHED: nobody can add to it, so the gods move on
 MAX_DESIGN_PARTS = 40
 MAX_DESIGNS = 200
 MAX_PARTS_TOTAL = 12000
@@ -220,6 +221,15 @@ class World:
             a.setdefault("inbox", [])
             a.setdefault("actions_taken", 0)
             a.setdefault("rest_until", None)
+            a.setdefault("habits", [])
+            a.setdefault("goal_since", 0)
+            if a.get("status") in ("thinking", "reading"):
+                # saved mid-thought (the world was closed while they were thinking): nobody is
+                # thinking at start-up, so free them, or the scheduler skips them forever
+                a["status"] = "idle"
+        for st in s["structures"].values():
+            if len(st.get("parts", [])) >= MAX_PARTS_PER_PLACE:
+                st["finished"] = True
 
     def save(self):
         with self.lock:
@@ -499,6 +509,12 @@ class World:
         if self.total_parts() + len(parts) > MAX_PARTS_TOTAL:
             return "The world is too full to build more right now."
         existing = self.find_structure(name)
+        if existing is not None and existing.get("finished"):
+            return (f"'{existing['name']}' is finished ({len(existing['parts'])} parts, the most one place can hold). "
+                    "Nobody can add to it. Make something NEW: a different place, an invention, or change the world's look.")
+        if existing is not None:
+            room = MAX_PARTS_PER_PLACE - len(existing["parts"])
+            parts = parts[:max(0, room)]
         sx, sz = self._site_for(a, action, existing)
         if self.dist(a["x"], a["z"], sx, sz) > REACH + 6:
             fixed = dict(action, x=sx, z=sz)
@@ -528,6 +544,9 @@ class World:
             p["by"] = a["id"]
         existing["parts"].extend(parts)
         existing["updated"] = self.stamp()
+        if len(existing["parts"]) >= MAX_PARTS_PER_PLACE and not existing.get("finished"):
+            existing["finished"] = True
+            self.add_event(a["id"], "finish", f"'{existing['name']}' is finished ({len(existing['parts'])} parts).")
         self.state["rev"] += 1
         a["status"] = "idle"
         self.add_event(a["id"], "build", f"{a['name']} added {len(parts)} part(s) to '{existing['name']}'.")
@@ -542,6 +561,8 @@ class World:
             if not parts:
                 return "The design came out empty; you set it aside."
             existing = self.find_structure(name)
+            if existing and existing.get("finished"):
+                return f"'{existing['name']}' is already finished. Design something new instead."
             if existing:
                 sx, sz = existing["x"], existing["z"]
             else:
@@ -560,6 +581,10 @@ class World:
         if self.dist(a["x"], a["z"], pr["x"], pr["z"]) > REACH + 6:
             self.walk_to(a, pr["x"] + 2, pr["z"] + 3, pending={"action": "continue_project"})
             return f"You head to your project '{pr['name']}'."
+        done = self.find_structure(pr["name"])
+        if done is not None and done.get("finished"):
+            a["project"] = None
+            return f"'{done['name']}' is finished; your project there is over. Time for something new."
         batch, pr["remaining"] = pr["remaining"][:PARTS_PER_CONTINUE], pr["remaining"][PARTS_PER_CONTINUE:]
         if self.total_parts() + len(batch) > MAX_PARTS_TOTAL:
             return "The world is too full to build more right now."

@@ -5,6 +5,7 @@ they do next, and applies it to the world. Nobody gives them tasks.
 """
 import json
 import time
+from collections import Counter
 
 from . import websearch
 from .brains import BrainError
@@ -43,6 +44,56 @@ ACTIONS_HELP = """ACTIONS (choose exactly one):
 Always also include "thought" (a short private thought) and "goal" (what you're working toward right now)."""
 
 
+HABIT_WINDOW = 8          # recent choices checked for being stuck
+STALE_GOAL_DAYS = 3       # game days on one goal before they're nudged to rethink it
+FRESH_ACTIONS = ("plan_project", "invent", "shape_world", "search_web", "say")
+
+
+def habit_of(act):
+    """A short signature of one choice, e.g. 'move:hephaestus' or 'build:athenatemple'."""
+    kind = str(act.get("action", "")).strip().lower().replace(" ", "_")
+    tgt = act.get("to") or act.get("name") or act.get("idea") or ""
+    if kind == "move" and not tgt:
+        try:
+            tgt = f"{round(float(act.get('x', 0)) / 5)},{round(float(act.get('z', 0)) / 5)}"
+        except (TypeError, ValueError):
+            tgt = ""
+    return f"{kind}:{str(tgt).strip().lower()[:40]}"
+
+
+def stuck_lines(a, day):
+    """Plain-English nudges when a god keeps repeating itself or clings to one goal."""
+    out = []
+    h = list(a.get("habits") or [])[-HABIT_WINDOW:]
+    if len(h) >= 6:
+        top, n = Counter(h).most_common(1)[0]
+        walking = sum(1 for x in h if x.startswith(("move:", "wander:")))
+        kind, _, tgt = top.partition(":")
+        if n >= 5:
+            what = f"{kind} {tgt}".strip()
+            out.append(f"YOU ARE STUCK: {n} of your last {len(h)} choices were '{what}'. It isn't getting anywhere. "
+                       "Choose something DIFFERENT now.")
+        elif walking >= 6:
+            out.append(f"YOU ARE STUCK: {walking} of your last {len(h)} choices were just walking. "
+                       "Do something where you are: build, invent, talk, change the weather, or look something up.")
+    kinds = {x.split(":", 1)[0] for x in (a.get("habits") or [])[-12:]}
+    fresh = [k for k in FRESH_ACTIONS if k not in kinds]
+    if fresh and len(a.get("habits") or []) >= 6:
+        out.append("THINGS YOU HAVEN'T DONE LATELY: " + ", ".join(fresh))
+    since = a.get("goal_since") or 0
+    if a.get("goal") and since and day - since >= STALE_GOAL_DAYS:
+        out.append(f"You've had the same goal since day {since} ({day - since} days). If it isn't moving, "
+                   'set a NEW "goal": something Olympus doesn\'t have yet.')
+    return out
+
+
+def set_goal(a, goal, day):
+    goal = clean_text(goal, 200)
+    if goal and goal != a.get("goal"):
+        a["goal"] = goal
+        a["goal_since"] = day
+
+
 def parts_help():
     return PARTS_HELP.format(shapes=", ".join(SHAPES), materials=", ".join(MATERIALS))
 
@@ -76,7 +127,8 @@ def build_action_prompt(world, agent_id):
         for d, s in p["places"]:
             by = world.state["agents"].get(s["builder"], {}).get("name", s["builder"])
             purpose = f" - {s['purpose']}" if s.get("purpose") else ""
-            lines.append(f'- "{s["name"]}" by {by}, {d} units away, {len(s["parts"])} parts{purpose}')
+            done = " (FINISHED: nobody can add to it)" if s.get("finished") else ""
+            lines.append(f'- "{s["name"]}" by {by}, {d} units away, {len(s["parts"])} parts{done}{purpose}')
     else:
         lines.append("PLACES IN THE WORLD: none yet. The plain is empty.")
     env = p["environment"]
@@ -105,6 +157,10 @@ def build_action_prompt(world, agent_id):
         lines.append("")
         lines.append("RECENT MEMORIES (oldest first):")
         lines.extend("- " + r for r in a["recent"][-14:])
+    nudges = stuck_lines(a, c["day"])
+    if nudges:
+        lines.append("")
+        lines.extend(nudges)
     lines.append("")
     lines.append(ACTIONS_HELP.format(maxparts=MAX_PARTS_PER_BUILD, shapes=", ".join(SHAPES),
                                      materials=", ".join(MATERIALS), weathers="|".join(WEATHERS)))
@@ -132,6 +188,9 @@ class Engine:
     def pick_agent(self):
         with self.world.lock:
             agents = self.world.state["agents"]
+            for a in agents.values():          # nobody is mid-thought between turns: free any stuck god
+                if a["status"] in ("thinking", "reading") and a["id"] != self.current:
+                    a["status"] = "idle"
             free = [a for a in agents.values() if not self.world.is_busy(a)]
             if not free:
                 return None
@@ -198,7 +257,8 @@ class Engine:
             a["status"] = "idle"
             a["thought"] = clean_text(act.get("thought"), 300)
             if act.get("goal"):
-                a["goal"] = clean_text(act.get("goal"), 200)
+                set_goal(a, act.get("goal"), w.clock()["day"])
+            a["habits"] = (list(a.get("habits") or []) + [habit_of(act)])[-12:]
             # messages they've now heard leave the inbox but stay in memory
             for m in heard:
                 w.remember(aid, f'{m["from"]} said: "{m["text"]}"', "heard")
@@ -335,9 +395,21 @@ class Engine:
             day = w.clock()["day"] - 1
             memories = "\n".join("- " + r for r in a["recent"][-30:]) or "- (nothing much)"
             prior = a.get("summary") or "(you haven't thought about it yet)"
+            mine = [s for s in w.state["structures"].values() if aid in s.get("contributors", [s.get("builder")])]
+            worked = "\n".join(f'- "{s["name"]}": {len(s["parts"])} parts' + (" (FINISHED)" if s.get("finished") else "")
+                               for s in mine) or "- (nothing yet)"
+            have = ", ".join(s["name"] for s in w.state["structures"].values()) or "nothing yet"
+            goal_now, since = a.get("goal") or "(none)", a.get("goal_since") or 0
         user = ("TASK: reflect\n"
                 f"Day {day} has ended. Here is what you remember of it:\n{memories}\n\n"
-                f"How you described yourself before: {prior}\n\n"
+                f"How you described yourself before: {prior}\n"
+                f"Your goal so far: {goal_now}" + (f" (since day {since})" if since else "") + "\n"
+                f"Places you've worked on:\n{worked}\n"
+                f"Everything that exists in Olympus: {have}\n\n"
+                "Olympus needs variety. If your goal's place is FINISHED, or you've chased the same goal for days, "
+                "choose a NEW goal for tomorrow: something Olympus doesn't have yet (for example a market, a road, "
+                "a garden, a theatre, a bath house, an invention, or a change in the weather), or something with "
+                "another god. Don't just repeat yesterday.\n\n"
                 "Write tonight's diary entry in your own voice (3-6 sentences, honest, specific, "
                 "mention real things that happened). Then update who you are becoming.\n"
                 'Reply as JSON: {"diary":"...","summary":"who you are now, max 60 words",'
@@ -354,6 +426,7 @@ class Engine:
             if isinstance(r.get("interests"), list):
                 a["interests"] = [clean_text(i, 40) for i in r["interests"][:6] if i]
             if r.get("goal"):
-                a["goal"] = clean_text(r["goal"], 200)
+                set_goal(a, r["goal"], day + 1)
+            a["habits"] = []                       # a new day: a fresh start
             w.remember(aid, f"Reflected on day {day}. Goal now: {a['goal']}", "reflection")
         return f"{aid}: reflected on day {day}"

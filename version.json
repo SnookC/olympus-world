@@ -1,4 +1,4 @@
 {
-  "version": "1.2.0",
-  "notes": "Update button: Olympus World can now update itself from GitHub."
+  "version": "1.3.0",
+  "notes": "Unsticks the gods: Zeus (frozen since a restart) gets his turns back; places are finished at 150 parts; gods that repeat themselves or keep one goal for days are nudged to do something new."
 }

@@ -66,6 +66,14 @@ stairs, wedge, ring, tree, bush), 16 materials, any colour, rotation, and parts 
 and from then on anyone can place it in their builds by name, at any size or angle.
 The Inventions tab shows who invented what and how often it's used.
 
+**Keeping them from getting stuck (1.3):** a place with 150 parts is **finished**:
+nobody can add to it, so the gods move on to something new. If a god picks the same
+thing over and over (or spends most turns just walking), it's told it's stuck and
+shown what it hasn't tried lately. A god that keeps one goal for 3+ game days is asked
+to rethink it, and the nightly reflection asks for something Olympus doesn't have yet.
+A god saved mid-thought (the world closed while it was thinking) is freed on start-up;
+before 1.3 that god was skipped forever.
+
 **Shaping the world (1.1):** a god can change the weather (clear, cloudy, rain,
 snow, mist, storm), the sky, horizon and ground colours, fog and clouds. After a
 change the world needs a few game hours to settle before anyone can change it again.

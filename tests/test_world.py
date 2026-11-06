@@ -408,3 +408,96 @@ class TestShutdownGuard(Base):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TestUnstuck(Base):
+    """1.3.0: a god saved mid-thought is freed; finished places; nudges when a god repeats itself."""
+
+    def engine(self, w, brain=None):
+        ledger = brains.UsageLedger(os.path.join(self.dir, "usage.json"))
+        return Engine(w, brains.Router(brain or brains.FakeBrain(3), ledger), self.settings, search_fn=fake_search)
+
+    def test_god_saved_mid_thought_is_freed_on_load(self):
+        w = self.world()
+        w.state["agents"]["zeus"]["status"] = "thinking"
+        w.state["agents"]["athena"]["status"] = "reading"
+        w.save()
+        w2 = self.world()
+        self.assertEqual(w2.state["agents"]["zeus"]["status"], "idle")
+        self.assertEqual(w2.state["agents"]["athena"]["status"], "idle")
+        self.assertFalse(w2.is_busy(w2.state["agents"]["zeus"]))
+
+    def test_scheduler_frees_a_stuck_thinker(self):
+        w = self.world()
+        e = self.engine(w)
+        for a in w.state["agents"].values():
+            a["status"] = "thinking"
+        self.assertIsNotNone(e.pick_agent())
+        self.assertTrue(all(a["status"] == "idle" for a in w.state["agents"].values()))
+
+    def test_place_is_finished_at_the_limit(self):
+        from olympus_world.world import MAX_PARTS_PER_PLACE
+        w = self.world()
+        z = w.state["agents"]["zeus"]
+        part = {"shape": "box", "w": 1, "h": 1, "d": 1}
+        for _ in range(MAX_PARTS_PER_PLACE // MAX_PARTS_PER_BUILD + 2):
+            w.apply_action("zeus", {"action": "build", "name": "Temple", "x": z["x"] + 1, "z": z["z"] + 1,
+                                    "parts": [dict(part) for _ in range(MAX_PARTS_PER_BUILD)]})
+        s = w.find_structure("Temple")
+        self.assertEqual(len(s["parts"]), MAX_PARTS_PER_PLACE)
+        self.assertTrue(s["finished"])
+        r = w.apply_action("zeus", {"action": "build", "name": "Temple", "parts": [part]})
+        self.assertIn("finished", r)
+        self.assertEqual(len(s["parts"]), MAX_PARTS_PER_PLACE)
+        self.assertIn("FINISHED", build_action_prompt(w, "hephaestus"))
+
+    def test_oversized_old_place_is_finished_on_load(self):
+        w = self.world()
+        w.state["structures"]["x1"] = {"id": "x1", "name": "Huge", "purpose": "", "builder": "zeus", "x": 5, "z": 5,
+                                       "parts": [{"shape": "box"}] * 380, "contributors": ["zeus"]}
+        w.save()
+        self.assertTrue(self.world().find_structure("Huge")["finished"])
+
+    def test_repeating_god_is_told_it_is_stuck(self):
+        w = self.world()
+        a = w.state["agents"]["zeus"]
+        a["habits"] = ["move:hephaestus"] * 7 + ["say:athena"]
+        p = build_action_prompt(w, "zeus")
+        self.assertIn("YOU ARE STUCK", p)
+        self.assertIn("move hephaestus", p)
+        a["habits"] = ["move:1,2", "wander:", "move:3,3", "move:0,0", "wander:", "move:2,2", "say:x", "move:9,9"]
+        self.assertIn("just walking", build_action_prompt(w, "zeus"))
+
+    def test_stale_goal_is_flagged(self):
+        w = self.world()
+        a = w.state["agents"]["athena"]
+        a["goal"], a["goal_since"] = "polish the carving", 1
+        w.state["game_minutes"] = 1440 * 5
+        self.assertIn("same goal since day 1", build_action_prompt(w, "athena"))
+
+    def test_decisions_are_recorded_as_habits(self):
+        w = self.world()
+        e = self.engine(w)
+        for _ in range(10):
+            e.run_once()
+        total = sum(len(a["habits"]) for a in w.state["agents"].values())
+        self.assertGreater(total, 0)
+        self.assertTrue(all(len(a["habits"]) <= 12 for a in w.state["agents"].values()))
+
+    def test_reflection_sees_places_and_asks_for_variety(self):
+        seen = {}
+
+        class Spy(brains.FakeBrain):
+            def chat(self, system, user):
+                if "TASK: reflect" in user:
+                    seen["user"] = user
+                return super().chat(system, user)
+        w = self.world()
+        z = w.state["agents"]["zeus"]
+        w.apply_action("zeus", {"action": "build", "name": "Altar", "x": z["x"] + 1, "z": z["z"] + 1,
+                                "parts": [{"shape": "box"}]})
+        e = self.engine(w, Spy(2))
+        e.reflect("zeus")
+        self.assertIn('"Altar"', seen["user"])
+        self.assertIn("Olympus needs variety", seen["user"])
+        self.assertEqual(w.state["agents"]["zeus"]["habits"], [])
