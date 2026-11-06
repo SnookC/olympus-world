@@ -59,9 +59,11 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1d3a; col
 
 .tabs { display: flex; border-bottom: 1px solid var(--paper-edge); padding: 0 6px; }
 .tabs button {
-  flex: 1; font: 600 12.5px var(--ui); background: none; border: 0; color: var(--muted);
-  padding: 9px 2px; cursor: pointer; border-bottom: 2px solid transparent;
+  flex: 1 1 auto; font: 600 12px var(--ui); background: none; border: 0; color: var(--muted);
+  padding: 9px 3px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
 }
+.tabs .count { display: inline-block; margin-left: 3px; min-width: 16px; padding: 0 4px; border-radius: 999px;
+  background: #e9b949; color: #2b2208; font-size: 10.5px; line-height: 16px; text-align: center; }
 .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
 
 .feed { flex: 1; overflow-y: auto; padding: 10px 12px 16px; }
@@ -128,3 +130,19 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1d3a; col
 .modal .fine { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin: 0 0 12px; }
 .row.end { justify-content: flex-end; gap: 8px; }
 .updlog { font: 12px ui-monospace, Consolas, monospace; background: #fff; border: 1px solid var(--paper-edge); border-radius: 8px; padding: 8px 10px; margin-bottom: 12px; max-height: 140px; overflow-y: auto; white-space: pre-wrap; }
+
+/* requests to the Watcher (1.4) */
+.card.req.open { border-color: #e9b949; box-shadow: 0 2px 0 #e9b949; }
+.card .badge.wait { background: #e9b949; border-color: #d9a62e; color: #2b2208; }
+.card .badge.yes { background: #e6f4ea; border-color: #b7dcc2; color: #1e6b37; }
+.card .badge.no { background: #f6eeee; border-color: #e6caca; color: #8a3a35; }
+.card .what { font-size: 15px; margin: 2px 0; }
+.card .when2 { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.card .ans { font-size: 13px; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--paper-edge); }
+.card textarea { width: 100%; margin-top: 8px; font: 13px var(--ui); border: 1px solid var(--paper-edge); border-radius: 8px;
+  padding: 6px 8px; resize: vertical; min-height: 34px; background: #fff; color: var(--ink); }
+.card .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.card .acts .btn { padding: 5px 11px; font-size: 12px; }
+.card .acts .btn.yes { background: #2f8a4c; border-color: #2f8a4c; color: #fff; }
+.card .acts .btn.copy { margin-left: auto; }
+.card.intro { background: #fff; font-size: 13px; line-height: 1.5; color: var(--muted); }

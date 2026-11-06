@@ -32,6 +32,35 @@ RESHAPE_COOLDOWN_MIN = 360   # game minutes between changes to the world's look
 HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
 ENV_DEFAULT = {"weather": "clear", "sky": "#3f6fd8", "horizon": "#cdd8ff", "ground": "#aaa4ea",
                "fog": 0.2, "clouds": 0.5, "by": None, "reason": "", "changed_at": -99999}
+# ---- graphics the gods can change (1.4) ------------------------------------------------
+GRAPHICS_COOLDOWN_MIN = 180       # game minutes between graphics changes
+SHADER_COOLDOWN_MIN = 120         # game minutes between new shaders for the same target (fixing your own failed one is exempt)
+EFFECT_KINDS = ["fireflies", "sparkles", "embers", "bubbles", "petals", "leaves", "dust"]
+SHADOW_MODES = ["soft", "sharp", "off"]
+SHADER_TARGETS = {
+    "sky": "vec3 shade(vec3 dir, float time, float daylight, vec3 top, vec3 bottom)",
+    "water": "vec3 shade(vec2 p, float time, float daylight, vec3 base)",
+    "ground": "vec3 shade(vec2 p, float time, float daylight, vec3 base)",
+}
+SHADER_MAX_CHARS = 1500
+SHADER_MAX_LOOPS = 2
+SHADER_MAX_LOOP_COUNT = 32
+SHADER_BANNED = ["#", "while", "do", "uniform", "attribute", "varying", "gl_", "discard", "texture", "sampler",
+                 "main", "precision", "layout", "__", "/*", "*/", "out", "inout", "dFd", "fwidth", "goto"]
+MAX_EFFECTS, MAX_PONDS, MAX_PATHS, MAX_MATERIAL_TWEAKS = 4, 6, 12, 16
+GRAPHICS_DEFAULT = {"sun_color": "#fff3dd", "sun_strength": 1.0, "sun_tilt": 20, "ambient_color": "#dfe6ff",
+                    "ambient_strength": 1.0, "shadows": "soft", "grid": True, "hills": 0.0, "materials": {},
+                    "effects": [], "ponds": [], "paths": [], "by": None, "reason": "", "changed_at": -99999}
+# ---- requests to the Watcher, the human who looks after Olympus (1.4) --------------------
+REQUEST_COOLDOWN_MIN = 720        # game minutes between requests from the same god (half a game day)
+MAX_OPEN_REQUESTS = 2             # unanswered requests per god: they wait for answers before asking for more
+MAX_REQUESTS_KEPT = 200
+# what the Watcher can answer -> (what the god hears, what the Live feed says)
+REQUEST_ANSWERS = {
+    "promised": ("Yes, I'll get that for you. It may take a while.", "said yes to {who}'s request for {what}"),
+    "given": ("It's done: you have it now.", "gave {who} {what}"),
+    "declined": ("No, not this one.", "said no to {who}'s request for {what}"),
+}
 WALK_SPEED = 2.5          # world units per real second
 REACH = 5.0               # how close a god must be to build or talk
 HEAR_RANGE = 25.0
@@ -160,6 +189,56 @@ def expand_parts(raw, designs, limit):
     return out, used, unknown
 
 
+def validate_shader(code):
+    """Check a god's shader body against the safety rules. Returns (clean code, None) or (None, reason).
+    It's only a function body: no inputs from outside except the ones given, no textures, no files,
+    and loops must have a small fixed count, so a shader can't hang the graphics card."""
+    if not isinstance(code, str) or not code.strip():
+        return None, "the shader was empty"
+    code = code.replace("\r", "").strip()
+    if code.startswith("{") and code.endswith("}"):
+        code = code[1:-1].strip()
+    if len(code) > SHADER_MAX_CHARS:
+        return None, f"too long ({len(code)} characters; the most is {SHADER_MAX_CHARS})"
+    if any(ord(ch) > 126 or (ord(ch) < 32 and ch not in "\n\t") for ch in code):
+        return None, "it has characters that aren't plain code"
+    low = code.lower()
+    for bad in SHADER_BANNED:
+        if bad == "do":
+            if re.search(r"\bdo\b", code):
+                return None, "'do' loops aren't allowed"
+        elif bad in ("main", "while", "uniform", "attribute", "varying", "precision", "layout", "goto", "inout", "out"):
+            if re.search(r"\b" + bad + r"\b", code):
+                return None, f"'{bad}' isn't allowed in a shader here"
+        elif bad.lower() in low:
+            return None, f"'{bad.strip()}' isn't allowed in a shader here"
+    if code.count("{") != code.count("}") or code.count("(") != code.count(")"):
+        return None, "its brackets don't match"
+    if not re.search(r"\breturn\b", code):
+        return None, "it never returns a colour"
+    loops = re.findall(r"\bfor\b", code)
+    if len(loops) > SHADER_MAX_LOOPS:
+        return None, f"too many loops (at most {SHADER_MAX_LOOPS})"
+    for m in re.finditer(r"\bfor\s*\(([^;]*);([^;]*);", code):
+        cond = m.group(2)
+        n = re.match(r"\s*\w+\s*<=?\s*(\d+)\s*$", cond)
+        if not n or int(n.group(1)) > SHADER_MAX_LOOP_COUNT:
+            return None, f"each loop must count to a fixed number of at most {SHADER_MAX_LOOP_COUNT} (like i < 8)"
+    return code, None
+
+
+def _request_key(text):
+    words = re.findall(r"[a-z0-9]+", str(text).lower())
+    return " ".join(w for w in words if w not in ("a", "an", "the", "some", "please", "new", "more"))
+
+
+def _same_request(k1, k2):
+    if not k1 or not k2:
+        return False
+    short, long_ = sorted((k1, k2), key=len)
+    return k1 == k2 or (len(short) >= 6 and short in long_)
+
+
 def clean_text(s, limit=400):
     if s is None:
         return ""
@@ -204,6 +283,8 @@ class World:
             "paused": False,
             "agents": agents, "structures": {}, "rev": 0,
             "designs": {}, "environment": dict(ENV_DEFAULT),
+            "graphics": json.loads(json.dumps(GRAPHICS_DEFAULT)), "shaders": {},
+            "requests": [], "next_request": 0,
             "events": [], "diaries": [], "searches": [], "talks": [],
         }
 
@@ -211,11 +292,15 @@ class World:
         s = self.state
         for key, default in (("events", []), ("diaries", []), ("searches", []),
                              ("talks", []), ("structures", {}), ("rev", 0), ("paused", False),
-                             ("designs", {})):
+                             ("designs", {}), ("requests", []), ("next_request", 0)):
             s.setdefault(key, default)
         env = s.setdefault("environment", {})
         for k, v in ENV_DEFAULT.items():
             env.setdefault(k, v)
+        gfx = s.setdefault("graphics", {})
+        for k, v in GRAPHICS_DEFAULT.items():
+            gfx.setdefault(k, json.loads(json.dumps(v)))
+        s.setdefault("shaders", {})
         for a in s["agents"].values():
             a.setdefault("recent", [])
             a.setdefault("inbox", [])
@@ -679,6 +764,226 @@ class World:
                        + (f' "{env["reason"]}"' if env["reason"] else ""))
         return "You reshaped the world: " + ", ".join(changed) + "."
 
+    # ------------------------------------------------------------------ graphics (1.4)
+    def _point(self, v):
+        """A place/being name or [x, z] -> (x, z) inside the world, or None."""
+        if isinstance(v, (list, tuple)) and len(v) >= 2:
+            return (_num(v[0], 0, -self.half, self.half), _num(v[1], 0, -self.half, self.half))
+        if isinstance(v, dict):
+            return (_num(v.get("x"), 0, -self.half, self.half), _num(v.get("z"), 0, -self.half, self.half))
+        if isinstance(v, str) and v.strip():
+            s = self.find_structure(v)
+            if s:
+                return (s["x"], s["z"])
+            o = self.find_agent(v)
+            if o:
+                return (o["x"], o["z"])
+        return None
+
+    def _act_tune_graphics(self, a, action):
+        g = self.state["graphics"]
+        gm = self.state["game_minutes"]
+        if gm - g.get("changed_at", -99999) < GRAPHICS_COOLDOWN_MIN:
+            who = self.state["agents"].get(g.get("by") or "", {}).get("name", "someone")
+            return f"{who} changed the graphics recently; they need a few hours to settle before changing again."
+        changed = []
+        for key in ("sun_color", "ambient_color"):
+            c = clean_color(action.get(key))
+            if c and c != g[key]:
+                g[key] = c
+                changed.append(f"{key.replace('_', ' ')} {c}")
+        for key, lo, hi in (("sun_strength", 0.3, 2.5), ("ambient_strength", 0.3, 2.0), ("sun_tilt", 0, 60), ("hills", 0, 1)):
+            if key in action:
+                v = round(_num(action.get(key), g[key], lo, hi), 2)
+                if v != g[key]:
+                    g[key] = v
+                    changed.append(f"{key.replace('_', ' ')} {v}")
+        sh = str(action.get("shadows", "")).strip().lower()
+        if sh in SHADOW_MODES and sh != g["shadows"]:
+            g["shadows"] = sh
+            changed.append(f"shadows {sh}")
+        if "grid" in action:
+            v = _truthy(action.get("grid"))
+            if v != g["grid"]:
+                g["grid"] = v
+                changed.append("grid lines " + ("on" if v else "off"))
+        mats = action.get("materials")
+        if isinstance(mats, dict):
+            for name, spec in list(mats.items())[:MAX_MATERIAL_TWEAKS]:
+                name = str(name).strip().lower()
+                if name not in MATERIALS or not isinstance(spec, dict):
+                    continue
+                cur = dict(g["materials"].get(name, {}))
+                c = clean_color(spec.get("color"))
+                if c:
+                    cur["color"] = c
+                for k, lo, hi in (("roughness", 0, 1), ("metalness", 0, 1), ("glow", 0, 2)):
+                    if k in spec:
+                        cur[k] = round(_num(spec.get(k), 0.5, lo, hi), 2)
+                if cur and cur != g["materials"].get(name):
+                    g["materials"][name] = cur
+                    changed.append(f"how {name} looks")
+        if "effects" in action:
+            raw = action.get("effects")
+            raw = [raw] if isinstance(raw, (dict, str)) else (raw if isinstance(raw, list) else [])
+            eff = []
+            for e in raw[:MAX_EFFECTS]:
+                if isinstance(e, str):
+                    e = {"kind": e}
+                if not isinstance(e, dict):
+                    continue
+                k = str(e.get("kind", "")).strip().lower()
+                if k in EFFECT_KINDS and k not in [x["kind"] for x in eff]:
+                    eff.append({"kind": k, "color": clean_color(e.get("color")) or None,
+                                "amount": round(_num(e.get("amount"), 0.5, 0.1, 1), 2)})
+            if eff != g["effects"]:
+                g["effects"] = eff
+                changed.append("effects: " + (", ".join(x["kind"] for x in eff) or "none"))
+        if "ponds" in action:
+            raw = action.get("ponds") if isinstance(action.get("ponds"), list) else []
+            ponds = []
+            for p in raw[:MAX_PONDS]:
+                pt = self._point(p.get("at") if isinstance(p, dict) and "at" in p else p)
+                if pt and isinstance(p, dict):
+                    ponds.append({"x": round(pt[0], 1), "z": round(pt[1], 1), "radius": round(_num(p.get("radius"), 4, 1, 12), 1),
+                                  "color": clean_color(p.get("color")) or "#3d8fd1"})
+            if ponds != g["ponds"]:
+                g["ponds"] = ponds
+                changed.append(f"{len(ponds)} pond(s)")
+        if "paths" in action:
+            raw = action.get("paths") if isinstance(action.get("paths"), list) else []
+            paths = []
+            for p in raw[:MAX_PATHS]:
+                if not isinstance(p, dict):
+                    continue
+                a0, b0 = self._point(p.get("from")), self._point(p.get("to"))
+                if a0 and b0 and (abs(a0[0] - b0[0]) + abs(a0[1] - b0[1])) > 1:
+                    paths.append({"from": [round(a0[0], 1), round(a0[1], 1)], "to": [round(b0[0], 1), round(b0[1], 1)],
+                                  "width": round(_num(p.get("width"), 1.6, 0.5, 4), 1),
+                                  "color": clean_color(p.get("color")) or "#d9c9a3"})
+            if paths != g["paths"]:
+                g["paths"] = paths
+                changed.append(f"{len(paths)} path(s)")
+        if not changed:
+            return "You thought about changing the graphics, but changed nothing."
+        g["by"] = a["id"]
+        g["reason"] = clean_text(action.get("reason"), 200)
+        g["changed_at"] = gm
+        self.state["rev"] += 1
+        self.add_event(a["id"], "restyle", f"{a['name']} changed the graphics: {', '.join(changed)}."
+                       + (f' "{g["reason"]}"' if g["reason"] else ""))
+        return "You changed the graphics: " + ", ".join(changed) + "."
+
+    def _act_request(self, a, action):
+        """Ask the Watcher (the human who looks after Olympus) for something they can't make themselves."""
+        what = clean_text(action.get("what") or action.get("item") or action.get("thing") or action.get("text"), 160)
+        why = clean_text(action.get("why") or action.get("reason"), 400)
+        if len(what) < 3:
+            return "You meant to ask the Watcher for something, but didn't say what."
+        reqs = self.state["requests"]
+        mine = [r for r in reqs if r["by"] == a["id"]]
+        waiting = [r for r in mine if r["status"] == "open"]
+        if len(waiting) >= MAX_OPEN_REQUESTS:
+            return (f"You already have {len(waiting)} requests waiting for the Watcher's answer "
+                    f"({', '.join(r['what'] for r in waiting)}); wait for those first.")
+        gm = self.state["game_minutes"]
+        if mine and gm - mine[-1].get("game_minutes", -99999) < REQUEST_COOLDOWN_MIN:
+            return "You asked the Watcher for something recently; give them time before asking again."
+        key = _request_key(what)
+        for r in reqs:
+            if r["status"] in ("open", "promised") and _same_request(key, _request_key(r["what"])):
+                who = "You" if r["by"] == a["id"] else self.state["agents"].get(r["by"], {}).get("name", "Someone")
+                return f'{who} already asked the Watcher for "{r["what"]}"; it is waiting for them.'
+        self.state["next_request"] = int(self.state.get("next_request", 0)) + 1
+        reqs.append({"id": f"r{self.state['next_request']}", "by": a["id"], "what": what, "why": why,
+                     "status": "open", "made": self.stamp(), "game_minutes": gm, "answer": "", "answered": None})
+        if len(reqs) > MAX_REQUESTS_KEPT:                  # forget the oldest answered ones, never a waiting one
+            done = [r for r in reqs if r["status"] in ("given", "declined")]
+            for r in done[: len(reqs) - MAX_REQUESTS_KEPT]:
+                reqs.remove(r)
+        self.add_event(a["id"], "request", f"{a['name']} asked the Watcher for {what}." + (f' "{why}"' if why else ""))
+        return f"You asked the Watcher for {what}. They answer when they can."
+
+    def answer_request(self, rid, status, note=""):
+        """The Watcher answers a request from the viewer. Returns the request, or None if there's no such one."""
+        with self.lock:
+            r = next((x for x in self.state["requests"] if x["id"] == rid), None)
+            if r is None or status not in REQUEST_ANSWERS:
+                return None
+            note = clean_text(note, 400)
+            if r["status"] == status and r.get("answer", "") == note:
+                return r
+            r["status"], r["answer"], r["answered"] = status, note, self.stamp()
+            heard, did = REQUEST_ANSWERS[status]
+            a = self.state["agents"].get(r["by"])
+            if a:
+                st = self.stamp()
+                text = f'About your request for {r["what"]}: {heard}' + (f" {note}" if note else "")
+                a["inbox"].append({"from": "The Watcher", "text": clean_text(text, 600), "direct": True,
+                                   "day": st["day"], "time": st["time"]})
+                a["inbox"] = a["inbox"][-6:]
+            who = a["name"] if a else r["by"]
+            self.add_event(r["by"], "request",
+                           "The Watcher " + did.format(who=who, what=r["what"]) + "." + (f' "{note}"' if note else ""))
+            return r
+
+    def shader_cooldown(self, a, target):
+        """None if this god may write a shader for this target now, else the reason not."""
+        cur = self.state["shaders"].get(target)
+        if not cur:
+            return None
+        if cur.get("by") == a["id"] and cur.get("status") == "failed":
+            return None                                     # fixing your own broken shader is always allowed
+        if self.state["game_minutes"] - cur.get("game_minutes", -99999) < SHADER_COOLDOWN_MIN:
+            who = self.state["agents"].get(cur.get("by") or "", {}).get("name", "someone")
+            return f"{who} gave the {target} a new shader recently; it needs a few hours before another."
+        return None
+
+    def save_shader(self, a, target, name, code, reason=""):
+        """Store a god's shader (already designed by the mind). The viewer test-compiles it."""
+        with self.lock:
+            if target not in SHADER_TARGETS:
+                return f"There is no '{target}' to shade (only {', '.join(SHADER_TARGETS)})."
+            clean, err = validate_shader(code)
+            name = clean_text(name or f"{a['name']}'s {target}", 50)
+            if err:
+                self.remember(a["id"], f"My {target} shader '{name}' was rejected before it ran: {err}.", "shader")
+                self.add_event(a["id"], "shader", f"{a['name']}'s {target} shader '{name}' broke the rules ({err}).")
+                return f"Your shader was rejected: {err}."
+            prev = self.state["shaders"].get(target) or {}
+            last_good = prev if prev.get("status") == "ok" else prev.get("last_good")
+            if last_good:
+                last_good = {k: v for k, v in last_good.items() if k != "last_good"}
+            import hashlib
+            self.state["shaders"][target] = {
+                "target": target, "name": name, "code": clean, "by": a["id"], "reason": clean_text(reason, 200),
+                "status": "untested", "error": "", "version": int(prev.get("version", 0)) + 1,
+                "hash": hashlib.sha1(clean.encode("utf-8")).hexdigest()[:12], "made": self.stamp(),
+                "game_minutes": self.state["game_minutes"], "last_good": last_good}
+            self.state["rev"] += 1
+            self.add_event(a["id"], "shader", f"{a['name']} wrote a {target} shader: '{name}'.")
+            return f"You wrote a {target} shader called '{name}'. It shows once the viewer has tested it."
+
+    def shader_result(self, target, code_hash, ok, error=""):
+        """The viewer's report after test-compiling (or timing) a shader."""
+        with self.lock:
+            cur = self.state["shaders"].get(target)
+            if not cur or cur.get("hash") != code_hash:
+                return False
+            new = "ok" if ok else "failed"
+            if cur.get("status") == new and (ok or cur.get("error") == clean_text(error, 300)):
+                return True
+            cur["status"], cur["error"] = new, ("" if ok else clean_text(error, 300))
+            who = self.state["agents"].get(cur["by"], {}).get("name", cur["by"])
+            if ok:
+                self.add_event(cur["by"], "shader", f"{who}'s {target} shader '{cur['name']}' works and is on screen.")
+                self.remember(cur["by"], f"My {target} shader '{cur['name']}' works; it's on screen now.", "shader")
+            else:
+                self.add_event(cur["by"], "shader", f"{who}'s {target} shader '{cur['name']}' didn't work: {cur['error']}")
+                self.remember(cur["by"], f"My {target} shader '{cur['name']}' failed: {cur['error']}. I can fix it.", "shader")
+            self.state["rev"] += 1
+            return True
+
     # search_web, plan_project and invent need the network/brain, so mind.py handles them.
 
     # ------------------------------------------------------------------ views
@@ -705,8 +1010,16 @@ class World:
                 "places": [(round(d), s) for d, s in places[:15]],
                 "place_count": len(places),
                 "environment": dict(self.state["environment"]),
+                "graphics": json.loads(json.dumps(self.state["graphics"])),
+                "shaders": {k: {"name": v["name"], "by": v["by"], "status": v["status"], "error": v.get("error", "")}
+                            for k, v in self.state["shaders"].items()},
                 "designs": sorted(self.state["designs"].values(), key=lambda d: -d.get("uses", 0))[:12],
                 "design_count": len(self.state["designs"]),
+                "my_requests": [{"what": r["what"], "status": r["status"], "answer": r.get("answer", "")}
+                                for r in self.state["requests"] if r["by"] == agent_id][-5:],
+                "other_requests": [{"by": r["by"], "what": r["what"], "status": r["status"]}
+                                   for r in self.state["requests"]
+                                   if r["by"] != agent_id and r["status"] in ("open", "promised")][-6:],
             }
 
     def public_state(self, since_rev=None):
@@ -728,8 +1041,11 @@ class World:
             designs = [{"name": d["name"], "inventor": d["inventor"], "description": d["description"],
                         "parts": len(d["parts"]), "uses": d.get("uses", 0), "version": d.get("version", 1),
                         "created": d["created"]} for d in self.state["designs"].values()]
+            shaders = {k: {kk: vv for kk, vv in v.items() if kk != "game_minutes"} for k, v in self.state["shaders"].items()}
             out = {"clock": self.clock(), "paused": self.state["paused"], "agents": agents,
                    "environment": self.state["environment"], "designs": designs,
+                   "graphics": self.state["graphics"], "shaders": shaders,
+                   "requests": [{k: v for k, v in r.items() if k != "game_minutes"} for r in self.state["requests"][-100:]],
                    "rev": self.state["rev"], "half": self.half,
                    "structure_count": len(self.state["structures"])}
             if since_rev is None or int(since_rev) != self.state["rev"]:

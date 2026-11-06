@@ -501,3 +501,219 @@ class TestUnstuck(Base):
         self.assertIn('"Altar"', seen["user"])
         self.assertIn("Olympus needs variety", seen["user"])
         self.assertEqual(w.state["agents"]["zeus"]["habits"], [])
+
+
+class TestGraphics(Base):
+    """1.4.0: the gods tune the graphics and write shaders; the viewer tests them."""
+
+    def engine(self, w, brain=None):
+        ledger = brains.UsageLedger(os.path.join(self.dir, "usage.json"))
+        return Engine(w, brains.Router(brain or brains.FakeBrain(4), ledger), self.settings, search_fn=fake_search)
+
+    def test_tune_graphics_clamps_and_records(self):
+        w = self.world()
+        r = w.apply_action("athena", {"action": "tune_graphics", "sun_color": "#ffd0a0", "sun_strength": 99, "hills": 0.6,
+                                      "shadows": "sharp", "grid": False,
+                                      "materials": {"marble": {"roughness": 5, "glow": 1.5, "color": "#ffeedd"}, "lava": {"glow": 1}},
+                                      "effects": [{"kind": "fireflies", "amount": 3}, "petals", {"kind": "lasers"}],
+                                      "ponds": [{"at": [5, 5], "radius": 50}], "reason": "warm evening"})
+        g = w.state["graphics"]
+        self.assertIn("changed the graphics", r)
+        self.assertEqual(g["sun_color"], "#ffd0a0")
+        self.assertEqual(g["sun_strength"], 2.5)
+        self.assertEqual(g["shadows"], "sharp")
+        self.assertFalse(g["grid"])
+        self.assertEqual(g["materials"], {"marble": {"color": "#ffeedd", "roughness": 1.0, "glow": 1.5}})
+        self.assertEqual([e["kind"] for e in g["effects"]], ["fireflies", "petals"])
+        self.assertEqual(g["effects"][0]["amount"], 1.0)
+        self.assertEqual(g["ponds"][0]["radius"], 12.0)
+        self.assertEqual(g["by"], "athena")
+        r2 = w.apply_action("zeus", {"action": "tune_graphics", "sun_strength": 1.2})
+        self.assertIn("recently", r2)
+
+    def test_paths_resolve_place_names(self):
+        w = self.world()
+        z = w.state["agents"]["zeus"]
+        w.apply_action("zeus", {"action": "build", "name": "Altar", "x": z["x"] + 1, "z": z["z"] + 1, "parts": [{"shape": "box"}]})
+        w.apply_action("zeus", {"action": "tune_graphics", "paths": [{"from": "Altar", "to": "Athena", "width": 9}]})
+        p = w.state["graphics"]["paths"][0]
+        alt = w.find_structure("Altar")
+        self.assertEqual(p["from"], [round(alt["x"], 1), round(alt["z"], 1)])
+        self.assertEqual(p["width"], 4.0)
+
+    def test_shader_rules(self):
+        from olympus_world.world import validate_shader
+        ok, err = validate_shader("float n = fbm(p * 0.3);\nfor (int i = 0; i < 8; i++) { n += 0.01; }\nreturn base * n;")
+        self.assertIsNone(err)
+        for bad, why in (("while (true) {} return base;", "while"), ("uniform float x; return base;", "uniform"),
+                         ("#define X 1\nreturn base;", "#"), ("for (int i = 0; i < 1000; i++) {} return base;", "fixed number"),
+                         ("for (int i = 0; i < n; i++) {} return base;", "fixed number"), ("vec3 c = base;", "never returns"),
+                         ("return texture(t, p).rgb;", "texture"), ("return base;" + "x" * 2000, "too long"),
+                         ("return (base;", "brackets"), ("gl_FragColor = vec4(1.0); return base;", "gl_")):
+            code, err = validate_shader(bad)
+            self.assertIsNone(code, bad)
+            self.assertIn(why, err)
+
+    def test_shader_saved_tested_and_failure_reaches_the_god(self):
+        w = self.world()
+        a = w.state["agents"]["hephaestus"]
+        r = w.save_shader(a, "ground", "Tiles", "return base * 0.9;", "stone tiles")
+        self.assertIn("Tiles", r)
+        cur = w.state["shaders"]["ground"]
+        self.assertEqual(cur["status"], "untested")
+        self.assertTrue(w.shader_result("ground", cur["hash"], True))
+        self.assertEqual(cur["status"], "ok")
+        # a broken new one keeps the working one as last_good, and the god hears why
+        w.save_shader(a, "ground", "Glitter", "return base * sparkle;", "")
+        cur2 = w.state["shaders"]["ground"]
+        self.assertEqual(cur2["last_good"]["name"], "Tiles")
+        self.assertFalse(w.shader_result("ground", "wronghash", False, "x"))
+        w.shader_result("ground", cur2["hash"], False, "'sparkle' : undeclared identifier")
+        self.assertEqual(cur2["status"], "failed")
+        self.assertTrue(any("sparkle" in m for m in a["recent"]))
+        self.assertIn("FAILED", build_action_prompt(w, "hephaestus"))
+        self.assertIsNone(w.shader_cooldown(a, "ground"))          # may fix own broken shader at once
+        self.assertIsNotNone(w.shader_cooldown(w.state["agents"]["zeus"], "ground"))
+
+    def test_rejected_shader_is_remembered(self):
+        w = self.world()
+        a = w.state["agents"]["athena"]
+        r = w.save_shader(a, "sky", "Bad", "while (true) {} return top;")
+        self.assertIn("rejected", r)
+        self.assertNotIn("sky", w.state["shaders"])
+        self.assertTrue(any("rejected" in m for m in a["recent"]))
+
+    def test_engine_writes_a_shader_through_the_brain(self):
+        w = self.world()
+        e = self.engine(w)
+        r = e.do_shader("zeus", "water", "gentle ripples")
+        self.assertIn("water shader", r)
+        self.assertEqual(w.state["shaders"]["water"]["status"], "untested")
+        self.assertIn("unknown", e.do_shader("zeus", "unknown", "x").replace("There's no 'unknown'", "unknown"))
+
+    def test_prompt_lists_graphics_actions_and_state(self):
+        w = self.world()
+        p = build_action_prompt(w, "athena")
+        self.assertIn("tune_graphics", p)
+        self.assertIn("write_shader", p)
+        self.assertIn("GRAPHICS:", p)
+        self.assertIn("SHADERS: none yet", p)
+
+    def test_old_world_gets_graphics(self):
+        w = self.world()
+        del w.state["graphics"]; del w.state["shaders"]
+        w.save()
+        w2 = self.world()
+        self.assertEqual(w2.state["graphics"]["shadows"], "soft")
+        self.assertEqual(w2.state["shaders"], {})
+
+    def test_many_fake_turns_with_graphics_stay_healthy(self):
+        w = self.world()
+        e = self.engine(w, brains.FakeBrain(11))
+        for _ in range(200):
+            try:
+                e.run_once()
+            except brains.BrainError:
+                pass
+            w.state["graphics"]["changed_at"] = -99999
+        json.dumps(w.public_state())
+
+
+class TestShaderEndpoint(Base):
+    def test_viewer_reports_shader_result(self):
+        app = App(self.dir, self.settings, fake=True, search_fn=fake_search)
+        a = app.world.state["agents"]["athena"]
+        app.world.save_shader(a, "sky", "Dawn", "return mix(bottom, top, dir.y);")
+        h = app.world.state["shaders"]["sky"]["hash"]
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        body = json.dumps({"target": "sky", "hash": h, "ok": True}).encode()
+        try:
+            with self.assertRaises(urllib.error.HTTPError):    # other websites can't report
+                urllib.request.urlopen(urllib.request.Request(base + "/api/shader_result", data=body, method="POST"))
+            req = urllib.request.Request(base + "/api/shader_result", data=body, method="POST",
+                                         headers={"X-Olympus": "1", "Content-Type": "application/json"})
+            self.assertTrue(json.loads(urllib.request.urlopen(req).read())["recorded"])
+            self.assertEqual(app.world.state["shaders"]["sky"]["status"], "ok")
+            st = json.loads(urllib.request.urlopen(base + "/api/state").read())
+            self.assertEqual(st["shaders"]["sky"]["code"], "return mix(bottom, top, dir.y);")
+            self.assertIn("graphics", st)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+class TestRequests(Base):
+    def test_god_asks_watcher_and_limits(self):
+        w = self.world()
+        r = w.apply_action("athena", {"action": "request", "what": "a harp sound for the plaza", "why": "music"})
+        self.assertIn("asked the Watcher", r)
+        self.assertEqual(w.state["requests"][0]["status"], "open")
+        self.assertEqual(w.state["requests"][0]["id"], "r1")
+        # too soon for another
+        self.assertIn("recently", w.apply_action("athena", {"action": "request", "what": "crops that grow"}))
+        w.state["game_minutes"] += 2000
+        # someone else asking for the same thing is told it's already waiting
+        self.assertIn("already asked", w.apply_action("zeus", {"action": "request", "what": "A harp sound"}))
+        w.apply_action("athena", {"action": "request", "what": "crops that grow"})
+        w.state["game_minutes"] += 2000
+        # two waiting: must wait for answers
+        self.assertIn("wait for those first", w.apply_action("athena", {"action": "request", "what": "a bell tower bell"}))
+        self.assertIn("didn't say what", w.apply_action("zeus", {"action": "request"}))
+
+    def test_answer_reaches_the_god(self):
+        w = self.world()
+        w.apply_action("hephaestus", {"action": "request", "what": "a forge fire effect"})
+        self.assertIsNone(w.answer_request("r99", "given"))
+        self.assertIsNone(w.answer_request("r1", "maybe"))
+        r = w.answer_request("r1", "promised", "Coming in the next update.")
+        self.assertEqual(r["status"], "promised")
+        msg = w.state["agents"]["hephaestus"]["inbox"][-1]
+        self.assertEqual(msg["from"], "The Watcher")
+        self.assertTrue(msg["direct"])
+        self.assertIn("Coming in the next update", msg["text"])
+        self.assertIn("said yes", w.state["events"][-1]["text"])
+        w.answer_request("r1", "given")
+        self.assertIn("gave Hephaestus", w.state["events"][-1]["text"])
+        # the god sees the answer in its prompt, and anyone may now ask again (nothing is waiting)
+        prompt = build_action_prompt(w, "hephaestus")
+        self.assertIn("you have it now", prompt)
+        self.assertIn('"action":"request"', prompt)
+        self.assertIn("THE WATCHER", prompt.upper())
+        st = w.public_state()
+        self.assertEqual(st["requests"][0]["status"], "given")
+        self.assertNotIn("game_minutes", st["requests"][0])
+
+    def test_old_world_gets_requests(self):
+        w = self.world()
+        del w.state["requests"], w.state["next_request"]
+        w.save()
+        w2 = self.world()
+        self.assertEqual(w2.state["requests"], [])
+        w2.apply_action("zeus", {"action": "request", "what": "thunder sounds"})
+        self.assertEqual(w2.state["requests"][0]["id"], "r1")
+
+    def test_answer_endpoint(self):
+        app = App(self.dir, self.settings, fake=True, search_fn=fake_search)
+        app.world.apply_action("zeus", {"action": "request", "what": "thunder sounds", "why": "storms are silent"})
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        body = json.dumps({"id": "r1", "status": "declined", "note": "Not yet."}).encode()
+        try:
+            with self.assertRaises(urllib.error.HTTPError):    # other websites can't answer for you
+                urllib.request.urlopen(urllib.request.Request(base + "/api/requests/answer", data=body, method="POST"))
+            req = urllib.request.Request(base + "/api/requests/answer", data=body, method="POST",
+                                         headers={"X-Olympus": "1", "Content-Type": "application/json"})
+            out = json.loads(urllib.request.urlopen(req).read())
+            self.assertEqual(out["request"]["status"], "declined")
+            bad = urllib.request.Request(base + "/api/requests/answer", data=json.dumps({"id": "r9", "status": "given"}).encode(),
+                                         method="POST", headers={"X-Olympus": "1"})
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(bad)
+            st = json.loads(urllib.request.urlopen(base + "/api/state").read())
+            self.assertEqual(st["requests"][0]["answer"], "Not yet.")
+        finally:
+            srv.shutdown()
+            srv.server_close()

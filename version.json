@@ -1,4 +1,4 @@
 {
-  "version": "1.3.0",
-  "notes": "Unsticks the gods: Zeus (frozen since a restart) gets his turns back; places are finished at 150 parts; gods that repeat themselves or keep one goal for days are nudged to do something new."
+  "version": "1.4.0",
+  "notes": "The gods can change their own graphics: light, shadows, how materials look, fireflies and other effects, distant hills, ponds and paths, plus small graphics programs (shaders) for the sky, water and ground that are tested before they show. New Requests tab: when a god needs something it can't make, it asks you, and you answer yes, done or no (Copy for Claude to have it built)."
 }

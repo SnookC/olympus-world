@@ -81,12 +81,93 @@ for (let i = 0; i < 18; i++) {
 }
 scene.add(clouds);
 
+// ------------------------------------------------------------------ shaders the gods write (1.4)
+// A god writes only the BODY of a small function; the viewer wraps it, test-compiles it in a scratch
+// WebGL context, and only then draws with it. If it fails (or is too slow) the last working one stays.
+const GLSL_HELPERS = `float hash(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float noise(vec2 p){ vec2 i = floor(p); vec2 f = fract(p); float a = hash(i); float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0)); float d = hash(i + vec2(1.0, 1.0)); vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y; }
+float fbm(vec2 p){ float v = 0.0; float a = 0.5; for (int i = 0; i < 5; i++) { v += a * noise(p); p *= 2.0; a *= 0.5; } return v; }
+`;
+const SIGS = {
+  sky: 'vec3 shade(vec3 dir, float time, float daylight, vec3 top, vec3 bottom)',
+  water: 'vec3 shade(vec2 p, float time, float daylight, vec3 base)',
+  ground: 'vec3 shade(vec2 p, float time, float daylight, vec3 base)',
+};
+const DEFAULT_BODY = {
+  sky: 'return mix(bottom, top, clamp(dir.y * 1.6 + 0.1, 0.0, 1.0));',
+  water: 'return base * (0.9 + 0.1 * noise(p * 0.6 + vec2(time * 0.2, 0.0)));',
+  ground: 'return base;',
+};
+const SHADES = { ...DEFAULT_BODY };          // the body each target is drawn with right now
+const shadeTime = { value: 0 }, shadeDay = { value: 1 };
+const shadeFn = (target, body) => `${GLSL_HELPERS}\n${SIGS[target]} {\n${body}\n}\n`;
+
+function shadedStandard(params, target) {
+  const m = new THREE.MeshStandardMaterial(params);
+  const body = SHADES[target];
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = shadeTime; sh.uniforms.uDay = shadeDay;
+    sh.vertexShader = 'varying vec3 vWP;\n' + sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\nvWP = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    sh.fragmentShader = 'uniform float uTime;\nuniform float uDay;\nvarying vec3 vWP;\n' + shadeFn(target, body)
+      + sh.fragmentShader.replace('vec4 diffuseColor = vec4( diffuse, opacity );',
+        'vec4 diffuseColor = vec4( clamp(shade(vWP.xz, uTime, uDay, diffuse), 0.0, 1.0), opacity );');
+  };
+  m.customProgramCacheKey = () => target + ':' + body;
+  return m;
+}
+
+const testGL = (() => { try { return document.createElement('canvas').getContext('webgl2'); } catch { return null; } })();
+function testShader(target, body) {
+  // returns null if it compiles and links, otherwise the error text
+  const gl = testGL;
+  if (!gl) return null;
+  const call = target === 'sky' ? 'shade(normalize(vP), uTime, uDay, uTop, uBottom)' : 'shade(vP.xz, uTime, uDay, uBase)';
+  const fs = `#version 300 es\nprecision highp float;\nuniform float uTime; uniform float uDay; uniform vec3 uTop; uniform vec3 uBottom; uniform vec3 uBase;\nin vec3 vP;\nout vec4 fragOut;\n${shadeFn(target, body)}\nvoid main(){ fragOut = vec4(${call}, 1.0); }`;
+  const vs = '#version 300 es\nin vec3 position; out vec3 vP; void main(){ vP = position; gl_Position = vec4(position, 1.0); }';
+  const make = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const v = make(gl.VERTEX_SHADER, vs), f = make(gl.FRAGMENT_SHADER, fs);
+  let err = null;
+  if (!gl.getShaderParameter(f, gl.COMPILE_STATUS)) err = (gl.getShaderInfoLog(f) || 'it did not compile').trim();
+  else {
+    const p = gl.createProgram(); gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) err = (gl.getProgramInfoLog(p) || 'it did not link').trim();
+    gl.deleteProgram(p);
+  }
+  gl.deleteShader(v); gl.deleteShader(f);
+  return err ? err.replace(/\s+/g, ' ').slice(0, 280) : null;
+}
+
+function skyMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTop: skyUniforms.top, uBottom: skyUniforms.bottom, uTime: shadeTime, uDay: shadeDay },
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    vertexShader: 'varying vec3 vP; void main(){ vP = (modelMatrix*vec4(position,1.0)).xyz; gl_Position = projectionMatrix*viewMatrix*vec4(vP,1.0); }',
+    fragmentShader: `uniform vec3 uTop; uniform vec3 uBottom; uniform float uTime; uniform float uDay; varying vec3 vP;\n${shadeFn('sky', SHADES.sky)}\nvoid main(){ gl_FragColor = vec4(clamp(shade(normalize(vP), uTime, uDay, uTop, uBottom), 0.0, 1.0), 1.0); }`,
+  });
+}
+sky.material.dispose();
+sky.material = skyMaterial();
+
+// ------------------------------------------------------------------ graphics the gods tune (1.4)
+let GFX = { sun_color: '#fff3dd', sun_strength: 1, sun_tilt: 20, ambient_color: '#dfe6ff', ambient_strength: 1,
+            shadows: 'soft', grid: true, hills: 0, materials: {}, effects: [], ponds: [], paths: [] };
+function vnoise(x, z) {
+  const h = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); };
+  const ix = Math.floor(x), iz = Math.floor(z), fx = x - ix, fz = z - iz;
+  const ux = fx * fx * (3 - 2 * fx), uz = fz * fz * (3 - 2 * fz);
+  const a = h(ix, iz), b = h(ix + 1, iz), c = h(ix, iz + 1), d = h(ix + 1, iz + 1);
+  return a + (b - a) * ux + (c - a) * uz + (a - b - c + d) * ux * uz;
+}
+
 let half = 40;
 let ground, grid, edge;
 function buildGround(h) {
   half = h;
   [ground, grid, edge].forEach((o) => o && scene.remove(o));
-  ground = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200), new THREE.MeshStandardMaterial({ color: '#aaa4ea', roughness: 0.95 }));
+  ground = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200, 220, 220), shadedStandard({ color: '#aaa4ea', roughness: 0.95 }, 'ground'));
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   grid = new THREE.GridHelper(h * 2, h / 2, 0xffffff, 0xffffff);
@@ -95,7 +176,22 @@ function buildGround(h) {
   grid.position.y = 0.01;
   const pts = [[-h, -h], [h, -h], [h, h], [-h, h], [-h, -h]].map(([x, z]) => new THREE.Vector3(x, 0.03, z));
   edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x5a4fcf, transparent: true, opacity: 0.5 }));
+  grid.visible = GFX.grid !== false;
   scene.add(ground, grid, edge);
+  applyHills(GFX.hills || 0);
+}
+function applyHills(amount) {
+  // gentle hills only OUTSIDE the world's edge, so nothing the gods built floats or sinks
+  const pos = ground.geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = -pos.getY(i);
+    const d = Math.max(Math.abs(x), Math.abs(z));
+    const t = Math.min(1, Math.max(0, (d - half - 8) / 70));
+    const ramp = t * t * (3 - 2 * t);
+    pos.setZ(i, amount > 0 ? amount * 22 * ramp * (0.3 + 0.7 * vnoise(x * 0.025, z * 0.025)) : 0);
+  }
+  pos.needsUpdate = true;
+  ground.geometry.computeVertexNormals();
 }
 buildGround(40);
 
@@ -228,11 +324,13 @@ function material(name, color, glow) {
   const key = `${name}|${color || ''}|${glow ? 1 : 0}`;
   if (matCache[key]) return matCache[key];
   const m = MAT[name] || MAT.stone;
-  const c = color || m.c;
+  const o = (GFX.materials || {})[name] || {};
+  const c = color || o.color || m.c;
+  const own = o.glow > 0 && !glow;
   const mat = new THREE.MeshStandardMaterial({
-    color: c, roughness: m.r ?? 0.8, metalness: m.m ?? 0,
+    color: c, roughness: o.roughness ?? m.r ?? 0.8, metalness: o.metalness ?? m.m ?? 0,
     transparent: m.o !== undefined, opacity: m.o ?? 1,
-    emissive: glow ? c : (m.e || '#000000'), emissiveIntensity: glow ? 1 : (m.e ? 0.5 : 0),
+    emissive: glow || own ? c : (m.e || '#000000'), emissiveIntensity: glow ? 1 : (own ? o.glow * 0.6 : (m.e ? 0.5 : 0)),
   });
   if (glow) glowMats.push(mat);
   matCache[key] = mat;
@@ -418,10 +516,169 @@ function applyTime(clock) {
   scene.fog.far = 340 - fog * 250;
   stars.material.opacity = Math.max(0, 1 - d * 2.2) * (1 - gloom);
   const ang = (mins / 1440) * Math.PI * 2 - Math.PI / 2;
-  sun.position.set(Math.cos(ang) * 90, Math.max(8, Math.sin(ang) * 110), 40);
-  sun.intensity = (0.15 + d * 1.6) * (1 - gloom * 0.7) + (flash > 0 ? 2.5 : 0);
-  hemi.intensity = 0.35 + d * 0.65 + (flash > 0 ? 1.5 : 0);
+  sun.position.set(Math.cos(ang) * 90, Math.max(8, Math.sin(ang) * 110), Math.tan(THREE.MathUtils.degToRad(GFX.sun_tilt ?? 20)) * 110);
+  sun.intensity = (0.15 + d * 1.6) * (1 - gloom * 0.7) * (GFX.sun_strength ?? 1) + (flash > 0 ? 2.5 : 0);
+  hemi.intensity = (0.35 + d * 0.65) * (GFX.ambient_strength ?? 1) + (flash > 0 ? 1.5 : 0);
+  shadeDay.value = d;
   cloudMat.color.copy(C('#5b5f98').lerp(C('#ffffff'), d)).lerp(GREY, gloom);
+}
+
+// ------------------------------------------------------------------ applying the gods' graphics (1.4)
+const EFFECT_LOOK = {   // default colour, size, glowing?, how it moves
+  fireflies: ['#fff27a', 0.55, true, 'drift'], sparkles: ['#ffffff', 0.35, true, 'twinkle'],
+  embers: ['#ff8a3d', 0.32, true, 'rise'], bubbles: ['#bfe8ff', 0.45, false, 'bob'],
+  petals: ['#ffb7d5', 0.5, false, 'fall'], leaves: ['#d98b2b', 0.55, false, 'fall'], dust: ['#e8dcc0', 0.22, false, 'dust'],
+};
+const effects = [];
+const extras = new THREE.Group();   // ponds and paths
+scene.add(extras);
+const pondMats = [];
+const gfxSeen = {};
+const changed = (k, v) => { const j = JSON.stringify(v ?? null); if (gfxSeen[k] === j) return false; gfxSeen[k] = j; return true; };
+
+function applyGraphics(g) {
+  GFX = Object.assign({}, GFX, g);
+  sun.color.set(GFX.sun_color || '#fff3dd');
+  hemi.color.set(GFX.ambient_color || '#dfe6ff');
+  if (grid) grid.visible = GFX.grid !== false;
+  if (changed('shadows', GFX.shadows)) {
+    sun.castShadow = GFX.shadows !== 'off';
+    renderer.shadowMap.type = GFX.shadows === 'sharp' ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+    scene.traverse((o) => { if (o.material) o.material.needsUpdate = true; });
+  }
+  if (changed('hills', GFX.hills) && ground) applyHills(GFX.hills || 0);
+  if (changed('materials', GFX.materials) && structures.size) {
+    for (const k of Object.keys(matCache)) delete matCache[k];
+    glowMats.length = 0;
+    for (const o of structures.values()) disposeStructure(o);
+    structures.clear();
+    if (state?.structures) syncStructures(state.structures);
+  }
+  if (changed('effects', GFX.effects)) buildEffects(GFX.effects || []);
+  if (changed('extras', [GFX.ponds, GFX.paths])) buildExtras(GFX.ponds || [], GFX.paths || []);
+}
+
+function buildEffects(list) {
+  for (const e of effects) { scene.remove(e.points); e.points.geometry.dispose(); e.points.material.dispose(); }
+  effects.length = 0;
+  for (const spec of list.slice(0, 4)) {
+    const look = EFFECT_LOOK[spec.kind];
+    if (!look) continue;
+    const n = Math.round(80 + (spec.amount ?? 0.5) * 520);
+    const pos = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) pos.set([(Math.random() * 2 - 1) * half * 1.15, 0.3 + Math.random() * 14, (Math.random() * 2 - 1) * half * 1.15], i * 3);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({ color: spec.color || look[0], size: look[1], map: haloTex, transparent: true, depthWrite: false,
+      opacity: 0.9, blending: look[2] ? THREE.AdditiveBlending : THREE.NormalBlending });
+    const points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    scene.add(points);
+    effects.push({ kind: spec.kind, move: look[3], glow: look[2], points, pos, n });
+  }
+}
+
+function stepEffects(dt, t) {
+  const night = 1 - lastDaylight;
+  const lim = half * 1.15;
+  for (const e of effects) {
+    const p = e.pos;
+    for (let i = 0; i < e.n; i++) {
+      const o = i * 3;
+      if (e.move === 'drift') { p[o] += Math.sin(t * 0.7 + i) * 0.7 * dt; p[o + 2] += Math.cos(t * 0.6 + i * 1.3) * 0.7 * dt; p[o + 1] += Math.sin(t * 1.1 + i) * 0.3 * dt; }
+      else if (e.move === 'rise' || e.move === 'bob') { p[o + 1] += (e.move === 'rise' ? 1.3 : 0.6) * dt; p[o] += Math.sin(t * 2 + i) * 0.3 * dt; if (p[o + 1] > 14) p[o + 1] = 0.3; }
+      else if (e.move === 'fall') { p[o + 1] -= 0.8 * dt; p[o] += Math.sin(t * 1.3 + i) * 0.8 * dt; if (p[o + 1] < 0.2) p[o + 1] = 14; }
+      else if (e.move === 'dust') { p[o] += 0.25 * dt; if (p[o] > lim) p[o] = -lim; }
+    }
+    if (e.move !== 'twinkle') e.points.geometry.attributes.position.needsUpdate = true;
+    e.points.material.opacity = e.move === 'twinkle' ? 0.45 + 0.45 * Math.sin(t * 3)
+      : e.kind === 'fireflies' ? 0.25 + night * 0.7 + 0.1 * Math.sin(t * 5) : 0.85;
+  }
+}
+
+function buildExtras(ponds, paths) {
+  for (const c of [...extras.children]) { extras.remove(c); c.geometry.dispose(); if (!pondMats.includes(c.material)) c.material.dispose(); }
+  for (const m of pondMats) m.dispose();
+  pondMats.length = 0;
+  for (const p of ponds) {
+    const mat = shadedStandard({ color: p.color || '#3d8fd1', roughness: 0.12, metalness: 0.1, transparent: true, opacity: 0.86 }, 'water');
+    pondMats.push(mat);
+    const m = new THREE.Mesh(new THREE.CircleGeometry(p.radius, 48), mat);
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(p.x, 0.035, p.z);
+    m.receiveShadow = true;
+    extras.add(m);
+  }
+  for (const p of paths) {
+    const [x0, z0] = p.from, [x1, z1] = p.to;
+    const len = Math.hypot(x1 - x0, z1 - z0);
+    const geo = new THREE.PlaneGeometry(len, p.width || 1.6);
+    geo.rotateX(-Math.PI / 2);
+    const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: p.color || '#d9c9a3', roughness: 0.9 }));
+    m.rotation.y = Math.atan2(-(z1 - z0), x1 - x0);
+    m.position.set((x0 + x1) / 2, 0.022, (z0 + z1) / 2);
+    m.receiveShadow = true;
+    extras.add(m);
+  }
+}
+
+// which shader each target uses: the newest that compiles (and isn't too slow), else the last good one
+const tested = new Map();       // hash -> null (works) or error text
+const reported = new Set();
+let watching = null;            // {target, hash, until, base}
+function report(target, hash, ok, error) {
+  const key = `${target}|${hash}|${ok}`;
+  if (reported.has(key)) return;
+  reported.add(key);
+  fetch('/api/shader_result', { method: 'POST', headers: { 'X-Olympus': '1', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target, hash, ok, error: error || '' }) }).catch(() => {});
+}
+function bodyFor(target, cur) {
+  if (!cur) return DEFAULT_BODY[target];
+  if (cur.status !== 'failed') {
+    if (!tested.has(cur.hash)) tested.set(cur.hash, testShader(target, cur.code));
+    const err = tested.get(cur.hash);
+    if (err === null) { if (cur.status === 'untested') report(target, cur.hash, true); return cur.code; }
+    report(target, cur.hash, false, err);
+  }
+  const lg = cur.last_good;
+  if (lg && lg.code) {
+    const key = 'lg:' + lg.hash;
+    if (!tested.has(key)) tested.set(key, testShader(target, lg.code));
+    if (tested.get(key) === null) return lg.code;
+  }
+  return DEFAULT_BODY[target];
+}
+function applyShaders(shaders) {
+  for (const target of ['sky', 'water', 'ground']) {
+    const cur = shaders[target];
+    const body = bodyFor(target, cur);
+    if (body === SHADES[target]) continue;
+    SHADES[target] = body;
+    if (target === 'sky') { const old = sky.material; sky.material = skyMaterial(); old.dispose(); }
+    if (target === 'ground' && ground) { const old = ground.material; ground.material = shadedStandard({ color: groundColor.clone(), roughness: 0.95 }, 'ground'); old.dispose(); }
+    if (target === 'water') buildExtras(GFX.ponds || [], GFX.paths || []);
+    if (cur && body === cur.code) watching = { target, hash: cur.hash, until: performance.now() + 6000, base: fps };
+  }
+}
+
+// speed guard: a god's shader that drags the viewer below 20 frames a second is switched off and reported
+let fps = 60;
+let shaderBroke = false;
+renderer.debug.onShaderError = () => { shaderBroke = true; };
+function watchSpeed(dt) {
+  if (dt > 0 && document.visibilityState === 'visible') fps = fps * 0.95 + (1 / dt) * 0.05;
+  if (!watching) return;
+  const w = watching;
+  const tooSlow = performance.now() > w.until && w.base >= 28 && fps < 20;
+  if (shaderBroke || tooSlow) {
+    shaderBroke = false;
+    watching = null;
+    const err = tooSlow ? `too slow: the viewer dropped to ${Math.round(fps)} frames a second` : 'it broke while drawing';
+    tested.set(w.hash, err);
+    report(w.target, w.hash, false, err);
+    if (state?.shaders) applyShaders(state.shaders);
+  } else if (performance.now() > w.until + 4000) watching = null;
 }
 
 // ------------------------------------------------------------------ selection / camera
@@ -459,6 +716,7 @@ async function poll() {
     const r = await fetch('/api/state' + (rev !== null ? `?rev=${rev}` : ''), { cache: 'no-store' });
     const s = await r.json();
     if (s.half && s.half !== half) buildGround(s.half);
+    if (s.graphics) applyGraphics(s.graphics);
     if (s.structures) { syncStructures(s.structures); state && (state.structures = s.structures); }
     s.structures = s.structures || state?.structures || [];
     rev = s.rev;
@@ -468,12 +726,15 @@ async function poll() {
       updateGodVisual(gods.get(a.id), a);
     }
     applyEnvironment(s.environment);
+    if (s.shaders) applyShaders(s.shaders);
     applyTime(s.clock);
     renderHud(s);
     renderGodCard();
     if (!filtersBuilt) renderFilters();
     if (tab === 'places') renderPlaces();
     if (tab === 'inventions') renderInventions();
+    renderReqCount();
+    if (tab === 'requests') renderRequests();
   } catch (e) {
     $('status').innerHTML = '<b>Can’t reach the world.</b> Is the black Olympus window still open?';
   }
@@ -559,6 +820,7 @@ const meta = (i, badge = '') => `<div class="meta"><span class="dot" style="back
 async function refreshFeed() {
   if (tab === 'places') return renderPlaces();
   if (tab === 'inventions') return renderInventions();
+  if (tab === 'requests') { reqSig = ''; return renderRequests(); }
   const q = new URLSearchParams({ kind: tab });
   if (filter !== 'all') q.set('agent', filter);
   let items = [];
@@ -593,9 +855,19 @@ function renderInventions() {
   const look = e && e.by ? `<div class="card"><div class="meta"><span class="dot" style="background:${colorOf(e.by)}"></span><span class="who">${esc(nameOf(e.by))}</span><span class="badge">shaped the world</span></div>
     <div class="look">weather <b>${esc(e.weather)}</b> · <span class="swatch" style="background:${esc(e.sky)}"></span> sky · <span class="swatch" style="background:${esc(e.horizon)}"></span> horizon · <span class="swatch" style="background:${esc(e.ground)}"></span> ground</div>
     ${e.reason ? `<div class="quote">“${esc(e.reason)}”</div>` : ''}</div>` : '';
-  if (!list.length) { feed.innerHTML = look + '<div class="empty">No inventions yet. When a god invents something (a column, a lamp, a fountain), anyone can build it, and it shows up here.</div>'; return; }
+  const g = state?.graphics, sh = state?.shaders || {};
+  const shLine = Object.entries(sh).map(([t, v]) => `<div class="look">${esc(t)} shader <b>“${esc(v.name)}”</b> by ${esc(nameOf(v.by))}: ${
+    v.status === 'ok' ? 'on screen' : v.status === 'untested' ? 'waiting for the viewer to test it' : 'didn’t work (' + esc(v.error) + ')'}${
+    v.status === 'failed' && v.last_good ? ` · showing “${esc(v.last_good.name)}” instead` : ''}</div>`).join('');
+  const gfxCard = g && (g.by || shLine) ? `<div class="card"><div class="meta">${g.by ? `<span class="dot" style="background:${colorOf(g.by)}"></span><span class="who">${esc(nameOf(g.by))}</span>` : ''}<span class="badge">graphics</span></div>
+    <div class="look">sun <span class="swatch" style="background:${esc(g.sun_color)}"></span> ×${g.sun_strength} · light <span class="swatch" style="background:${esc(g.ambient_color)}"></span> ×${g.ambient_strength} · shadows ${esc(g.shadows)}${g.hills ? ' · hills ' + g.hills : ''}${g.grid === false ? ' · no grid' : ''}</div>
+    ${(g.effects || []).length ? `<div class="look">effects: ${g.effects.map((e) => esc(e.kind)).join(', ')}</div>` : ''}
+    ${(g.ponds || []).length || (g.paths || []).length ? `<div class="look">${(g.ponds || []).length} pond(s) · ${(g.paths || []).length} path(s)</div>` : ''}
+    ${Object.keys(g.materials || {}).length ? `<div class="look">restyled: ${Object.keys(g.materials).map(esc).join(', ')}</div>` : ''}
+    ${shLine}${g.reason ? `<div class="quote">“${esc(g.reason)}”</div>` : ''}</div>` : '';
+  if (!list.length) { feed.innerHTML = look + gfxCard + '<div class="empty">No inventions yet. When a god invents something (a column, a lamp, a fountain), anyone can build it, and it shows up here.</div>'; return; }
   list.sort((a, b) => (b.uses - a.uses) || (b.created?.real || '').localeCompare(a.created?.real || ''));
-  feed.innerHTML = look + list.map((d) => `<div class="card">
+  feed.innerHTML = look + gfxCard + list.map((d) => `<div class="card">
     <div class="meta"><span class="dot" style="background:${colorOf(d.inventor)}"></span><span class="who">${esc(d.name)}</span><span class="badge">used ${d.uses}×</span></div>
     <div class="look">invented by ${esc(nameOf(d.inventor))} · ${d.parts} parts${d.version > 1 ? ` · version ${d.version}` : ''}</div>
     ${d.description ? `<div class="quote">${esc(d.description)}</div>` : ''}</div>`).join('');
@@ -614,6 +886,84 @@ function renderPlaces() {
   feed.querySelectorAll('.place').forEach((el) => el.onclick = () => {
     const o = structures.get(el.dataset.id);
     if (o) { selected = null; renderGodCard(); focusOn(o.center); }
+  });
+}
+
+// ------------------------------------------------------------------ requests (1.4)
+// When a god needs something they can't make, they ask you (the Watcher). You answer here;
+// "Copy for Claude" puts the request on your clipboard so you can paste it to Claude to have it built.
+let reqSig = '';
+const reqNotes = {};
+const REQ_BADGE = { open: ['waiting for you', 'wait'], promised: ['you said yes', 'yes'], given: ['given', 'yes'], declined: ['you said no', 'no'] };
+function renderReqCount() {
+  const n = (state?.requests || []).filter((r) => r.status === 'open').length;
+  const el = $('reqcount');
+  el.hidden = !n;
+  el.textContent = n;
+}
+function reqText(r) {
+  const who = nameOf(r.by);
+  return `Olympus World request from ${who} (Day ${r.made?.day}, ${r.made?.time}):\n` +
+    `${who} wants: ${r.what}\n` + (r.why ? `Why: ${r.why}\n` : '') +
+    `Please add this to Olympus World for ${who}.`;
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch { /* fall back below */ }
+  const ta = document.createElement('textarea');
+  ta.value = t; document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+function renderRequests() {
+  const feed = $('feed');
+  if (feed.contains(document.activeElement) && document.activeElement.tagName === 'TEXTAREA') return;   // don't wipe a note you're typing
+  let list = (state?.requests || []).slice();
+  if (filter !== 'all') list = list.filter((r) => r.by === filter);
+  const sig = JSON.stringify(list.map((r) => [r.id, r.status, r.answer])) + filter;
+  if (sig === reqSig) return;
+  reqSig = sig;
+  const order = { open: 0, promised: 1, given: 2, declined: 2 };
+  list.sort((a, b) => (order[a.status] - order[b.status]) ||
+    (a.status === 'open' ? (a.made?.real || '').localeCompare(b.made?.real || '') : (b.made?.real || '').localeCompare(a.made?.real || '')));
+  const intro = `<div class="card intro">When a god needs or wants something they can't make themselves, they ask you here.
+    Say <b>yes</b>, then press <b>Copy for Claude</b> and paste it to Claude to have it built.
+    Press <b>Done</b> once it's installed so they know they have it.</div>`;
+  if (!list.length) { feed.innerHTML = intro + '<div class="empty">No requests yet.</div>'; return; }
+  feed.innerHTML = intro + list.map((r) => {
+    const [label, cls] = REQ_BADGE[r.status] || [r.status, ''];
+    const live = r.status === 'open' || r.status === 'promised';
+    const ans = r.answered ? `<div class="ans">You ${r.status === 'given' ? 'gave it' : r.status === 'promised' ? 'said yes' : 'said no'} on Day ${r.answered.day} · ${esc(r.answered.time)}${r.answer ? `: <i>“${esc(r.answer)}”</i>` : ''}</div>` : '';
+    return `<div class="card req ${r.status}" data-id="${esc(r.id)}">
+      <div class="meta"><span class="dot" style="background:${colorOf(r.by)}"></span><span class="who">${esc(nameOf(r.by))}</span><span>asks for</span><span class="badge ${cls}">${label}</span></div>
+      <div class="what"><b>${esc(r.what)}</b></div>
+      ${r.why ? `<div class="quote">“${esc(r.why)}”</div>` : ''}
+      <div class="when2">Day ${r.made?.day} · ${esc(r.made?.time || '')}</div>
+      ${ans}
+      ${live ? `<textarea placeholder="Note to ${esc(nameOf(r.by))} (optional)" data-note="${esc(r.id)}">${esc(reqNotes[r.id] || '')}</textarea>
+      <div class="acts">
+        ${r.status === 'open' ? `<button class="btn yes" data-ans="promised">Yes, I'll get it</button>` : ''}
+        <button class="btn" data-ans="given">Done, it's theirs</button>
+        <button class="btn" data-ans="declined">No</button>
+        <button class="btn copy" data-copy="1">Copy for Claude</button>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+  feed.querySelectorAll('textarea[data-note]').forEach((t) => t.oninput = () => { reqNotes[t.dataset.note] = t.value; });
+  feed.querySelectorAll('.card.req').forEach((card) => {
+    const r = list.find((x) => x.id === card.dataset.id);
+    card.querySelectorAll('[data-ans]').forEach((b) => b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await fetch('/api/requests/answer', { method: 'POST', headers: { 'X-Olympus': '1', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: r.id, status: b.dataset.ans, note: reqNotes[r.id] || '' }) });
+        delete reqNotes[r.id];
+      } catch { b.disabled = false; }
+      reqSig = ''; poll();
+    });
+    const cb = card.querySelector('[data-copy]');
+    if (cb) cb.onclick = async () => { cb.textContent = (await copyText(reqText(r))) ? 'Copied!' : 'Couldn’t copy'; setTimeout(() => { cb.textContent = 'Copy for Claude'; }, 1800); };
   });
 }
 
@@ -691,6 +1041,9 @@ function frame() {
     o.halo.material.emissiveIntensity = a.status === 'thinking' ? 1.4 + Math.sin(t * 8) * 0.8 : 1.0;
   }
   stepWeather(dt, t);
+  shadeTime.value = t;
+  stepEffects(dt, t);
+  watchSpeed(dt);
   if (state) applyTime(state.clock);
   for (const c of clouds.children) { c.position.x += dt * 1.2; if (c.position.x > 180) c.position.x = -180; }
   if (selected && gods.has(selected)) flyTo = gods.get(selected).group.position.clone().setY(1);
@@ -716,5 +1069,5 @@ await poll();
 renderFilters();
 refreshFeed();
 setInterval(poll, 1000);
-setInterval(() => { if (tab !== 'places' && tab !== 'inventions') refreshFeed(); }, 3000);
+setInterval(() => { if (tab !== 'places' && tab !== 'inventions' && tab !== 'requests') refreshFeed(); }, 3000);
 frame();

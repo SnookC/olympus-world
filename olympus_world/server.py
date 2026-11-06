@@ -206,6 +206,31 @@ def make_handler(app):
                     return self._json({"error": "no update available"}, 409)
                 threading.Thread(target=app.install_update, daemon=True).start()
                 return self._json({"installing": True})
+            if u.path == "/api/shader_result":
+                # the viewer test-compiled (or timed) a god's shader and reports how it went
+                if not from_viewer:
+                    return self._json({"error": "forbidden"}, 403)
+                try:
+                    n = min(int(self.headers.get("Content-Length") or 0), 4000)
+                    body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+                except (ValueError, UnicodeDecodeError):
+                    return self._json({"error": "bad request"}, 400)
+                ok = app.world.shader_result(str(body.get("target", "")), str(body.get("hash", "")),
+                                             bool(body.get("ok")), str(body.get("error", ""))[:300])
+                return self._json({"recorded": ok})
+            if u.path == "/api/requests/answer":
+                # you answered a god's request in the Requests tab
+                if not from_viewer:
+                    return self._json({"error": "forbidden"}, 403)
+                try:
+                    n = min(int(self.headers.get("Content-Length") or 0), 4000)
+                    body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+                except (ValueError, UnicodeDecodeError):
+                    return self._json({"error": "bad request"}, 400)
+                r = app.world.answer_request(str(body.get("id", "")), str(body.get("status", "")), str(body.get("note", ""))[:400])
+                if r is None:
+                    return self._json({"error": "no such request"}, 404)
+                return self._json({"request": {k: v for k, v in r.items() if k != "game_minutes"}})
             if u.path in ("/api/pause", "/api/resume"):
                 if not from_viewer:
                     return self._json({"error": "forbidden"}, 403)

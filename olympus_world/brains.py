@@ -150,10 +150,20 @@ class FakeBrain:
                                "parts": [{"shape": "cylinder", "dx": 0, "y": 0, "dz": 0, "w": 0.3, "h": 3, "d": 0.3, "material": "iron"},
                                          {"shape": "sphere", "dx": 0, "y": 3, "dz": 0, "w": 0.6, "h": 0.6, "d": 0.6,
                                           "material": "glass", "color": "#ffd27a", "glow": True}]})
+        if task == "shader":
+            if "ground" in user.split("YOUR IDEA")[0][:200]:
+                code = "float n = fbm(p * 0.3); return mix(base, vec3(0.35, 0.5, 0.3), n * 0.5);"
+            elif "for the water" in user:
+                code = "float w = noise(p * 0.8 + vec2(time * 0.3, 0.0)); return base * (0.8 + 0.4 * w);"
+            else:
+                code = "vec3 c = mix(bottom, top, clamp(dir.y * 1.6 + 0.1, 0.0, 1.0)); return c;"
+            return json.dumps({"name": r.choice(["Soft Light", "Moss and Stone", "Quiet Ripples"]), "code": code,
+                               "note": "a gentle look"})
         if task == "search_reflection":
             return json.dumps({"reflection": "Interesting, though it left me with more questions than answers."})
         kind = r.choice(["move", "build", "say", "wander", "write_diary", "plan_project",
-                         "continue_project", "search_web", "build", "say", "invent", "shape_world"])
+                         "continue_project", "search_web", "build", "say", "invent", "shape_world",
+                         "tune_graphics", "write_shader", "request"])
         act = {"thought": "Let me see what happens.", "goal": "make this place feel alive", "action": kind}
         if kind == "move":
             act["x"], act["z"] = r.randint(-20, 20), r.randint(-20, 20)
@@ -174,6 +184,15 @@ class FakeBrain:
         elif kind == "shape_world":
             act.update(weather=r.choice(["clear", "cloudy", "rain", "snow", "mist", "storm"]),
                        sky=r.choice(["#3f6fd8", "#5a8ee8", "#7a5cc0"]), reason="it felt right")
+        elif kind == "tune_graphics":
+            act.update(sun_color=r.choice(["#ffe2b0", "#fff3dd", "#ffd0a0"]), hills=round(r.random(), 2),
+                       effects=[{"kind": r.choice(["fireflies", "petals", "sparkles"]), "amount": 0.5}],
+                       materials={"marble": {"roughness": 0.3, "glow": 0}}, reason="warmer light")
+        elif kind == "write_shader":
+            act.update(target=r.choice(["sky", "water", "ground"]), idea="something calm")
+        elif kind == "request":
+            act.update(what=r.choice(["a harp sound for the plaza", "a way to plant crops that grow", "rain that leaves puddles",
+                                      "a bigger mind for designing temples"]), why="we can't make it ourselves")
         elif kind == "say":
             act.update(to=r.choice(["Zeus", "Athena", "Hephaestus"]),
                        text=r.choice(["What should we make next?", "Have you seen the light at dusk?",

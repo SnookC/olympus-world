@@ -10,14 +10,17 @@ from collections import Counter
 from . import websearch
 from .brains import BrainError
 from .world import (MATERIALS, SHAPES, WEATHERS, MAX_PARTS_PER_BUILD, MAX_PARTS_PER_PROJECT,
-                    MAX_DESIGN_PARTS, clean_text)
+                    MAX_DESIGN_PARTS, MAX_OPEN_REQUESTS, EFFECT_KINDS, SHADER_TARGETS, SHADER_MAX_CHARS, SHADER_MAX_LOOP_COUNT,
+                    clean_text)
 
 SYSTEM_TEMPLATE = """You are {name}, {title}. {persona}
 You live in Olympus, a small 3D world that began as a bare, flat plain under an open sky.
 Nothing exists here unless someone builds it: no buildings, shops, roads or entertainment
 until a resident decides to make them. Nobody gives you tasks or instructions. You decide
 how to spend your time, what you care about, and what to create. You can look things up
-about the real human world, but you live here.
+about the real human world, but you live here. A human, the Watcher, looks after Olympus from
+outside. The Watcher never tells you what to do, but if you need or want something you can't make
+yourselves, you can ask them for it.
 Stay in character. Be specific and concrete. Reply with ONE JSON object and nothing else."""
 
 PARTS_HELP = """A part: {{"shape":"box","dx":0,"y":0,"dz":0,"w":4,"h":3,"d":1,"material":"stone","rot":0,"color":"#c0a060","glow":false}}
@@ -35,6 +38,18 @@ ACTIONS_HELP = """ACTIONS (choose exactly one):
 {{"action":"continue_project"}}   (build the next section of your project)
 {{"action":"invent","idea":"<a reusable object, e.g. an ornate column, a fountain, a lamp post>"}}   (designs it once; then anyone can build it by name)
 {{"action":"shape_world","weather":"<{weathers}>","sky":"#rrggbb","horizon":"#rrggbb","ground":"#rrggbb","fog":0.2,"clouds":0.5,"reason":"..."}}   (change how the whole world looks; include only what you change)
+{{"action":"tune_graphics","sun_color":"#rrggbb","sun_strength":1.0,"sun_tilt":20,"ambient_color":"#rrggbb","ambient_strength":1.0,"shadows":"soft|sharp|off","grid":true,"hills":0.5,
+   "materials":{{"marble":{{"color":"#rrggbb","roughness":0.4,"metalness":0.1,"glow":0}}}},
+   "effects":[{{"kind":"<{effects}>","color":"#rrggbb","amount":0.5}}],
+   "ponds":[{{"at":"<place name or [x,z]>","radius":4,"color":"#rrggbb"}}],
+   "paths":[{{"from":"<place name or [x,z]>","to":"<place name or [x,z]>","width":1.5,"color":"#rrggbb"}}],"reason":"..."}}
+    (change the GRAPHICS: light, shadows, how materials look, floating effects, distant hills, ponds and paths; include only what you change;
+     effects/ponds/paths replace the current lists)
+{{"action":"write_shader","target":"sky|water|ground","idea":"<what it should look like, e.g. an aurora, rippling water, mossy stone tiles>"}}
+    (writes a small graphics program that paints the whole sky, every pond, or the ground; the viewer tests it before it shows)
+{{"action":"request","what":"<one specific thing you need or want but can't make yourself>","why":"..."}}
+    (ask the Watcher: e.g. a new ability, building shape, material, sound or music, effect, tool, or software/an AI model for
+     their computer. They answer when they can: yes, done, or no. At most {maxreq} waiting at a time)
 {{"action":"search_web","query":"..."}}   (read about the real human world on Wikipedia; read-only)
 {{"action":"write_diary","text":"..."}}
 {{"action":"demolish","name":"<a place you built>"}}
@@ -46,7 +61,7 @@ Always also include "thought" (a short private thought) and "goal" (what you're 
 
 HABIT_WINDOW = 8          # recent choices checked for being stuck
 STALE_GOAL_DAYS = 3       # game days on one goal before they're nudged to rethink it
-FRESH_ACTIONS = ("plan_project", "invent", "shape_world", "search_web", "say")
+FRESH_ACTIONS = ("plan_project", "invent", "shape_world", "tune_graphics", "write_shader", "search_web", "say")
 
 
 def habit_of(act):
@@ -137,6 +152,41 @@ def build_action_prompt(world, agent_id):
         who = world.state["agents"].get(env["by"], {}).get("name", env["by"])
         look += f" (last changed by {who}" + (f": {env['reason']}" if env.get("reason") else "") + ")"
     lines.append(look)
+    g = p["graphics"]
+    gl = [f"sun {g['sun_color']} x{g['sun_strength']} tilt {g['sun_tilt']}", f"shadows {g['shadows']}",
+          "grid " + ("on" if g["grid"] else "off")]
+    if g.get("hills"):
+        gl.append(f"hills {g['hills']}")
+    if g.get("effects"):
+        gl.append("effects " + ", ".join(e["kind"] for e in g["effects"]))
+    if g.get("ponds"):
+        gl.append(f"{len(g['ponds'])} pond(s)")
+    if g.get("paths"):
+        gl.append(f"{len(g['paths'])} path(s)")
+    if g.get("materials"):
+        gl.append("restyled materials: " + ", ".join(g["materials"]))
+    lines.append("GRAPHICS: " + "; ".join(gl))
+    if p["shaders"]:
+        sl = []
+        for t, v in p["shaders"].items():
+            by = world.state["agents"].get(v["by"], {}).get("name", v["by"])
+            st = {"ok": "works", "untested": "waiting to be tested", "failed": "FAILED: " + (v.get("error") or "")[:120]}.get(v["status"], v["status"])
+            sl.append(f"{t} '{v['name']}' by {by} ({st})")
+        lines.append("SHADERS: " + "; ".join(sl))
+    else:
+        lines.append("SHADERS: none yet (the sky, water and ground use the plain built-in look)")
+    said = {"open": "waiting for an answer", "promised": "the Watcher said yes and will get it",
+            "given": "the Watcher gave it: you have it now", "declined": "the Watcher said no"}
+    if p["my_requests"]:
+        lines.append("YOUR REQUESTS TO THE WATCHER: " + "; ".join(
+            f'"{r["what"]}" ({said.get(r["status"], r["status"])}' + (f': "{r["answer"]}"' if r.get("answer") else "") + ")"
+            for r in p["my_requests"]))
+    else:
+        lines.append("YOUR REQUESTS TO THE WATCHER: none yet.")
+    if p["other_requests"]:
+        lines.append("OTHERS' REQUESTS: " + "; ".join(
+            f'{world.state["agents"].get(r["by"], {}).get("name", r["by"])} asked for "{r["what"]}" ({said.get(r["status"], r["status"])})'
+            for r in p["other_requests"]))
     if p["designs"]:
         lines.append(f"INVENTIONS anyone can build ({p['design_count']} total):")
         for d in p["designs"]:
@@ -163,7 +213,46 @@ def build_action_prompt(world, agent_id):
         lines.extend(nudges)
     lines.append("")
     lines.append(ACTIONS_HELP.format(maxparts=MAX_PARTS_PER_BUILD, shapes=", ".join(SHAPES),
-                                     materials=", ".join(MATERIALS), weathers="|".join(WEATHERS)))
+                                     materials=", ".join(MATERIALS), weathers="|".join(WEATHERS),
+                                     effects="|".join(EFFECT_KINDS), maxreq=MAX_OPEN_REQUESTS))
+    return "\n".join(lines)
+
+
+SHADER_INPUTS = {
+    "sky": "dir = the direction you're looking (normalized; dir.y is 1 straight up, 0 at the horizon, negative below), "
+           "time = seconds (for animation), daylight = 0 at night to 1 at noon, top/bottom = today's sky and horizon colours",
+    "water": "p = position on the world map (x, z) in metres, time = seconds, daylight = 0 night to 1 noon, base = the pond's colour",
+    "ground": "p = position on the world map (x, z) in metres (the world is about 80 x 80), time = seconds, "
+              "daylight = 0 night to 1 noon, base = the ground colour",
+}
+
+
+def shader_prompt(target, idea, prev=None):
+    sig = SHADER_TARGETS[target]
+    lines = ["TASK: shader", "",
+             f"Write a GLSL shader BODY for the {target} of Olympus. It is the inside of this function:",
+             f"    {sig} {{ ...your code... }}",
+             f"Inputs: {SHADER_INPUTS[target]}.",
+             "Return the colour as vec3 (each channel 0.0 to 1.0).",
+             "Helpers you can call: float hash(vec2 p) (random 0..1), float noise(vec2 p) (smooth 0..1), "
+             "float fbm(vec2 p) (layered noise 0..1).",
+             "Rules: GLSL ES (WebGL) only. Write floats with a decimal point (1.0 not 1). No textures, no while loops, "
+             f"at most 2 for-loops each counting to a fixed number of at most {SHADER_MAX_LOOP_COUNT} "
+             f"(for (int i = 0; i < 8; i++)). No 'uniform', '#', 'main' or 'gl_'. At most {SHADER_MAX_CHARS} characters. "
+             "Keep it cheap: it runs for every pixel, every frame.",
+             "",
+             "Example (ground, mossy stone tiles):",
+             "  vec2 t = floor(p / 3.0); float n = fbm(p * 0.7); vec3 stone = mix(base, vec3(0.55, 0.53, 0.5), 0.6) * (0.85 + 0.3 * hash(t));",
+             "  float edge = step(0.92, max(fract(p.x / 3.0), fract(p.y / 3.0))); return mix(stone, vec3(0.3, 0.45, 0.25), max(edge, n * 0.4));",
+             "Example (sky, soft drifting clouds):",
+             "  vec3 c = mix(bottom, top, clamp(dir.y * 1.6 + 0.1, 0.0, 1.0)); if (dir.y < 0.0) return c;",
+             "  float cl = fbm(dir.xz / (dir.y + 0.15) * 2.0 + vec2(time * 0.01, 0.0)); return mix(c, vec3(1.0), smoothstep(0.55, 0.8, cl) * daylight);",
+             "", f"YOUR IDEA: {idea}"]
+    if prev and prev.get("status") == "failed":
+        lines += ["", f"The current {target} shader '{prev['name']}' FAILED with this error: {prev.get('error', '')}",
+                  "Its code was:", prev["code"][:SHADER_MAX_CHARS],
+                  "Either fix that mistake in your version or write something new; don't repeat the error."]
+    lines += ["", 'Reply as JSON: {"name":"<short name>","code":"<the function body>","note":"<what it looks like, one line>"}']
     return "\n".join(lines)
 
 
@@ -270,6 +359,8 @@ class Engine:
             result = self.do_plan(aid, act.get("idea"))
         elif kind == "invent":
             result = self.do_invent(aid, act.get("idea") or act.get("name"))
+        elif kind == "write_shader":
+            result = self.do_shader(aid, act.get("target"), act.get("idea") or act.get("name"))
         else:
             result = w.apply_action(aid, act)
         with w.lock:
@@ -384,6 +475,31 @@ class Engine:
             with w.lock:
                 w.state["agents"][aid]["status"] = "idle"
         return w.save_design(w.state["agents"][aid], idea, design)
+
+    def do_shader(self, aid, target, idea):
+        """Write a small GPU program for the sky, water or ground (a 'big moment')."""
+        w = self.world
+        target = str(target or "").strip().lower()
+        idea = clean_text(idea, 200) or "something beautiful"
+        with w.lock:
+            a = w.state["agents"][aid]
+            if target not in SHADER_TARGETS:
+                return f"There's no '{target}' to paint with a shader (choose sky, water or ground)."
+            wait = w.shader_cooldown(a, target)
+            if wait:
+                return wait
+            a["status"] = "thinking"
+            system = system_for(a)
+            prev = w.state["shaders"].get(target)
+        user = shader_prompt(target, idea, prev)
+        try:
+            r = self.router.big(system, user)
+        except BrainError:
+            with w.lock:
+                w.state["agents"][aid]["status"] = "idle"
+            raise
+        return w.save_shader(w.state["agents"][aid], target, r.get("name") or idea, r.get("code"),
+                             reason=r.get("note") or idea)
 
     def reflect(self, aid):
         """Once per game day: a diary entry and an updated sense of self (a 'big moment')."""

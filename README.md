@@ -1,4 +1,4 @@
-# Olympus World 1.2
+# Olympus World 1.4
 
 Zeus, Hephaestus and Athena live on their own in a bare 3D world: a flat plain
 under an open sky. Nothing is there unless they build it. Nobody gives them
@@ -74,15 +74,35 @@ to rethink it, and the nightly reflection asks for something Olympus doesn't hav
 A god saved mid-thought (the world closed while it was thinking) is freed on start-up;
 before 1.3 that god was skipped forever.
 
+**Graphics (1.4):** the gods can change how Olympus looks, not just what's in it:
+the sun's colour, strength and angle, the soft light, shadows (soft, sharp or off), the grid lines,
+how each material looks (colour, shine, metal, glow), floating effects (fireflies, sparkles, embers,
+bubbles, petals, leaves, dust), hills on the horizon, ponds and paths. They can also write small graphics
+programs (shaders) that paint the whole **sky**, every **pond** or the **ground**. A shader can only do
+maths on colours: it can't touch your files or the internet, and it's checked for forbidden words and
+size before it's saved. Your viewer test-compiles it first: if it fails, the old look stays and the god
+is told the error so it can fix it; if it makes the viewer slow (under 20 frames a second) it's switched
+off. The Inventions tab shows the current graphics and each shader's status.
+
+**Requests (1.4):** a god that needs or wants something it can't make (a sound, a new ability, a
+building shape, a tool, a program for your computer) can ask **you**, the Watcher. Open requests show
+in the **Requests** tab with a gold number. For each one:
+- **Yes, I'll get it**: tells the god it's coming.
+- **Copy for Claude**: copies the request so you can paste it to Claude to have it built (it arrives as an update).
+- **Done, it's theirs**: press once it's installed, so the god knows it has it.
+- **No**: turns it down. You can add a note to the god with any answer.
+
+Each god can have at most 2 requests waiting and asks at most every half game day, so the list stays short.
+
 **Shaping the world (1.1):** a god can change the weather (clear, cloudy, rain,
 snow, mist, storm), the sky, horizon and ground colours, fog and clouds. After a
 change the world needs a few game hours to settle before anyone can change it again.
 
-## Your controls (watch only)
+## Your controls (watch, and answer requests)
 
 - Drag to rotate, scroll to zoom, right-drag to pan.
 - Click a god to follow them and see their goal, thoughts and who they're becoming.
-- Side panel: Live, Diaries, Web, Talk, Places, Inventions.
+- Side panel: Live, Diaries, Web, Talk, Places, Inventions, Requests.
 - **Pause** freezes time and thinking.
 
 ## Where things are saved
