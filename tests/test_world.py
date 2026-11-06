@@ -717,3 +717,99 @@ class TestRequests(Base):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TestTidyRules(Base):
+    def P(self, **k):
+        base = {"shape": "box", "material": "stone", "dx": 0, "y": 0, "dz": 0, "w": 1, "h": 1, "d": 1}
+        base.update(k)
+        return clean_part(base)
+
+    def test_fit_shrinks_evenly(self):
+        from olympus_world.world import fit_parts, footprint
+        row = [self.P(dx=x, w=2, h=4) for x in range(-30, 31, 5)]
+        k = fit_parts(row)
+        self.assertLess(k, 0.4)
+        self.assertLessEqual(footprint(row), 10.01)
+        self.assertAlmostEqual(row[0]["h"] / row[0]["w"], 2.0, places=1)    # same shape, just smaller
+
+    def test_gravity(self):
+        from olympus_world.world import settle
+        cols = [self.P(dx=-3, h=6), self.P(dx=3, h=6)]
+        roof = self.P(y=6, w=8, h=1, d=2)
+        lamp = self.P(y=5.5, w=0.3, h=0.5, d=0.3)             # hangs from the roof's underside
+        beam = self.P(dx=9, y=20, w=4)                          # floating in the sky
+        chain = [self.P(dx=-9, y=12, w=2), self.P(dx=-7, y=12, w=2)]   # two touching floating pieces
+        parts = [roof, lamp, beam] + chain + cols               # listed in a silly order on purpose
+        settle(parts)
+        self.assertEqual(roof["y"], 6)
+        self.assertEqual(lamp["y"], 5.5)
+        self.assertEqual(beam["y"], 0)
+        self.assertEqual([c["y"] for c in chain], [0, 0])
+
+    def test_new_places_never_overlap(self):
+        w = self.world()
+        a = w.state["agents"]["zeus"]
+        for i in range(5):
+            a["x"], a["z"] = 0, 0
+            parts = [{"shape": "box", "dx": x, "dz": 0, "w": 3, "h": 3, "d": 3} for x in (-6, 0, 6)]
+            r = w.apply_action("zeus", {"action": "build", "name": f"Hall {i}", "x": 0, "z": 0, "parts": parts})
+            if "head to" in r:                                  # walked to the site; finish the trip
+                a["x"], a["z"] = a["tx"], a["tz"]
+                a["tx"] = a["tz"] = None
+                w.apply_action("zeus", a.pop("pending") or {}, arrived=True)
+        sts = list(w.state["structures"].values())
+        self.assertEqual(len(sts), 5)
+        for i, s1 in enumerate(sts):
+            for s2 in sts[i + 1:]:
+                apart = (abs(s1["x"] - s2["x"]) >= s1["plot"] + s2["plot"]) or (abs(s1["z"] - s2["z"]) >= s1["plot"] + s2["plot"])
+                self.assertTrue(apart, (s1["name"], s2["name"]))
+
+    def test_tidy_old_world_once(self):
+        w = self.world()
+        for i in range(4):     # an old-style heap: four places piled on the centre, one 60 wide
+            parts = [clean_part({"shape": "box", "dx": x, "w": 2, "h": 2, "d": 2}) for x in range(-30, 31, 6)]
+            parts.append(clean_part({"shape": "box", "y": 25, "w": 2, "h": 2, "d": 2}))
+            w.state["structures"][f"s{i}"] = {"id": f"s{i}", "name": f"Heap {i}", "builder": "zeus", "x": 0, "z": 0,
+                                              "parts": parts, "contributors": ["zeus"], "created": w.stamp()}
+        w.state.pop("tidy_version")
+        w.save()
+        w2 = self.world()
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "world_before_tidy.json")))
+        sts = list(w2.state["structures"].values())
+        for i, s1 in enumerate(sts):
+            row_top = max(p["h"] for p in s1["parts"])
+            self.assertLessEqual(max(p["y"] for p in s1["parts"]), row_top + 0.01)   # the floating block fell onto the row
+            for s2 in sts[i + 1:]:
+                self.assertTrue(abs(s1["x"] - s2["x"]) >= s1["plot"] + s2["plot"]
+                                or abs(s1["z"] - s2["z"]) >= s1["plot"] + s2["plot"])
+        self.assertIn("tidied", w2.state["events"][-1]["text"])
+        where = {s["id"]: (s["x"], s["z"]) for s in sts}
+        w2.save()
+        w3 = self.world()                                      # second start-up: nothing moves again
+        self.assertEqual(where, {s["id"]: (s["x"], s["z"]) for s in w3.state["structures"].values()})
+
+    def test_already_there_and_observe(self):
+        w = self.world()
+        w.apply_action("athena", {"action": "build", "name": "Well", "parts": [{"shape": "cylinder", "w": 2, "h": 1, "d": 2}]})
+        a = w.state["agents"]["athena"]
+        st = w.find_structure("Well")
+        a["x"], a["z"], a["tx"], a["tz"] = st["x"], st["z"] + st["plot"] + 1, None, None
+        self.assertIn("already at", w.apply_action("athena", {"action": "move", "to": "Well"}))
+        self.assertIn("looked around", w.apply_action("athena", {"action": "observe"}))
+
+    def test_big_files_are_compressed(self):
+        import gzip as gz
+        app = App(self.dir, self.settings, fake=True, search_fn=fake_search)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(base + "/vendor/three.module.js", headers={"Accept-Encoding": "gzip"}))
+            self.assertEqual(r.headers["Content-Encoding"], "gzip")
+            self.assertIn(b"three", gz.decompress(r.read())[:5000].lower())
+            r2 = urllib.request.urlopen(base + "/vendor/three.module.js")
+            self.assertIsNone(r2.headers["Content-Encoding"])
+        finally:
+            srv.shutdown()
+            srv.server_close()

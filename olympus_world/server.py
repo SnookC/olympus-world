@@ -3,6 +3,7 @@
 Only your own PC can open the viewer (it listens on 127.0.0.1).
 """
 import argparse
+import gzip
 import json
 import subprocess
 import mimetypes
@@ -13,6 +14,8 @@ import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_GZ = {}   # compressed copies of big static files
 
 from . import VERSION, updater
 from .brains import FakeBrain, GeminiBrain, OllamaBrain, Router, UsageLedger
@@ -248,10 +251,23 @@ def make_handler(app):
             if not full.startswith(os.path.normpath(WEB_DIR)) or not os.path.isfile(full):
                 return self._json({"error": "not found"}, 404)
             ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+            if full.endswith(".js"):
+                ctype = "text/javascript"
             with open(full, "rb") as f:
                 body = f.read()
+            zipped = False
+            if len(body) > 64_000 and "gzip" in (self.headers.get("Accept-Encoding") or "") and not ctype.startswith("image/"):
+                # big files (three.js is 1.3 MB) go compressed: about 5x smaller, so the viewer loads faster
+                key = (full, os.path.getmtime(full))
+                if key not in _GZ:
+                    if len(_GZ) > 8:
+                        _GZ.clear()
+                    _GZ[key] = gzip.compress(body, 6)
+                body, zipped = _GZ[key], True
             self.send_response(200)
             self.send_header("Content-Type", ctype)
+            if zipped:
+                self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()

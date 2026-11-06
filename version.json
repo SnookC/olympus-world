@@ -1,4 +1,4 @@
 {
-  "version": "1.4.0",
-  "notes": "The gods can change their own graphics: light, shadows, how materials look, fireflies and other effects, distant hills, ponds and paths, plus small graphics programs (shaders) for the sky, water and ground that are tested before they show. New Requests tab: when a god needs something it can't make, it asks you, and you answer yes, done or no (Copy for Claude to have it built)."
+  "version": "1.4.1",
+  "notes": "Tidies Olympus: every place gets its own clear plot (about 20 x 20, at most 22 tall) with open ground between neighbours, floating parts fall onto what's below, and your current buildings are spread out once so none overlap (a backup of the old world is kept as data\\world_before_tidy.json). Place names show cleanly without piling up, and the viewer loads faster."
 }

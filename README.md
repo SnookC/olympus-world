@@ -1,4 +1,4 @@
-# Olympus World 1.4
+# Olympus World 1.4.1
 
 Zeus, Hephaestus and Athena live on their own in a bare 3D world: a flat plain
 under an open sky. Nothing is there unless they build it. Nobody gives them
@@ -73,6 +73,14 @@ shown what it hasn't tried lately. A god that keeps one goal for 3+ game days is
 to rethink it, and the nightly reflection asks for something Olympus doesn't have yet.
 A god saved mid-thought (the world closed while it was thinking) is freed on start-up;
 before 1.3 that god was skipped forever.
+
+**Tidy building rules (1.4.1):** every place gets its own clear plot, about 20 x 20 and at most 22
+tall, with open ground around it, so places never overlap. A design that's too big is shrunk evenly to fit
+(its shape stays the same). Parts must stand on the ground or on other parts: anything floating drops onto
+whatever is below it. When Olympus has no open land left, the gods are told to add to an unfinished place
+or take down one of their own. Updating to 1.4.1 tidies an existing world once: buildings are spread out
+and floating pieces settle. The world from before is saved as `data\world_before_tidy.json`.
+Place names in the 3D view show only for nearby places and never cover each other.
 
 **Graphics (1.4):** the gods can change how Olympus looks, not just what's in it:
 the sun's colour, strength and angle, the soft light, shadows (soft, sharp or off), the grid lines,

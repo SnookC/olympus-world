@@ -409,20 +409,60 @@ function disposeStructure(o) {
   scene.remove(o.group);
 }
 
+// "market_square" -> "Market Square", "AthenaWisdomCarving" -> "Athena Wisdom Carving"
+function prettyName(n) {
+  return String(n).replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\s+/g, ' ').trim()
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+// Place name tags: only the nearest ones that don't cover each other, so the view isn't a wall of labels.
+const LABEL_DIST = 70, _lv = new THREE.Vector3(), _lv2 = new THREE.Vector3();
+let labelTick = 0;
+function declutterLabels(dt) {
+  labelTick -= dt;
+  if (labelTick > 0) return;
+  labelTick = 0.2;
+  // labels keep a fixed size on screen (sizeAttenuation off): scale -> pixels doesn't depend on distance
+  const px = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+  const shown = [];
+  const rect = (spr, at) => {
+    _lv.copy(at).project(camera);
+    if (_lv.z >= 1 || Math.abs(_lv.x) > 1.1 || Math.abs(_lv.y) > 1.1) return null;
+    return { x: (_lv.x + 1) * innerWidth / 2, y: (1 - _lv.y) * innerHeight / 2, w: spr.scale.x * px + 10, h: spr.scale.y * px + 4 };
+  };
+  const hits = (r) => shown.some((q) => Math.abs(q.x - r.x) < (q.w + r.w) / 2 && Math.abs(q.y - r.y) < (q.h + r.h) / 2);
+  for (const o of gods.values()) {          // gods' names always show and win over place names
+    if (!o.label) continue;
+    const r = rect(o.label, _lv2.copy(o.group.position).setY(o.group.position.y + o.label.position.y));
+    if (r) shown.push(r);
+  }
+  const list = [...structures.values()].map((o) => ({ o, d: camera.position.distanceTo(o.labelAt) })).sort((a, b) => a.d - b.d);
+  for (const { o, d } of list) {
+    const r = d < LABEL_DIST ? rect(o.label, o.labelAt) : null;
+    const vis = !!r && !hits(r);
+    if (vis) shown.push(r);
+    o.label.visible = vis;
+  }
+}
+
 function syncStructures(list) {
   const seen = new Set();
   for (const s of list) {
     seen.add(s.id);
     const ex = structures.get(s.id);
-    if (ex && ex.count === s.parts.length && ex.name === s.name) continue;
+    let sum = 0;
+    for (const p of s.parts) sum += p.y * 3 + p.w + p.dx * 7 + p.dz * 5;
+    const sig = `${s.parts.length}|${s.name}|${s.x}|${s.z}|${sum.toFixed(2)}`;
+    if (ex && ex.sig === sig) continue;
     if (ex) disposeStructure(ex);
     const { g, top } = buildStructureMesh(s);
-    const lbl = textSprite(s.name, { size: 28, pad: 12, bg: 'rgba(35,33,58,0.82)', fg: '#fbf6e9', border: 'rgba(0,0,0,0)', scale: 0.012 });
+    const lbl = textSprite(prettyName(s.name), { size: 28, pad: 12, bg: 'rgba(35,33,58,0.82)', fg: '#fbf6e9', border: 'rgba(0,0,0,0)', scale: 0.012 });
     lbl.position.y = top + 1.6;
     g.add(lbl);
     g.position.set(s.x, 0, s.z);
     scene.add(g);
-    structures.set(s.id, { group: g, count: s.parts.length, name: s.name, center: new THREE.Vector3(s.x, top / 2, s.z) });
+    structures.set(s.id, { group: g, sig, count: s.parts.length, name: s.name, label: lbl, labelAt: new THREE.Vector3(s.x, top + 1.6, s.z),
+      center: new THREE.Vector3(s.x, top / 2, s.z) });
   }
   for (const [id, o] of structures) if (!seen.has(id)) { disposeStructure(o); structures.delete(id); }
 }
@@ -880,7 +920,7 @@ function renderPlaces() {
   if (!list.length) { feed.innerHTML = '<div class="empty">The plain is still empty. Whatever appears here, they decided to build.</div>'; return; }
   list.sort((a, b) => (b.updated?.real || '').localeCompare(a.updated?.real || ''));
   feed.innerHTML = list.map((s) => `<div class="card place" data-id="${s.id}">
-    <div class="meta"><span class="dot" style="background:${colorOf(s.builder)}"></span><span class="who">${esc(s.name)}</span><span class="badge">${s.parts.length} parts</span></div>
+    <div class="meta"><span class="dot" style="background:${colorOf(s.builder)}"></span><span class="who">${esc(prettyName(s.name))}</span><span class="badge">${s.parts.length} parts</span></div>
     <div class="look">built by ${esc(nameOf(s.builder))}${(s.contributors || []).length > 1 ? ' with ' + s.contributors.filter((c) => c !== s.builder).map(nameOf).map(esc).join(', ') : ''}</div>
     ${s.purpose ? `<div class="quote">${esc(s.purpose)}</div>` : ''}</div>`).join('');
   feed.querySelectorAll('.place').forEach((el) => el.onclick = () => {
@@ -1041,6 +1081,7 @@ function frame() {
     o.halo.material.emissiveIntensity = a.status === 'thinking' ? 1.4 + Math.sin(t * 8) * 0.8 : 1.0;
   }
   stepWeather(dt, t);
+  declutterLabels(dt);
   shadeTime.value = t;
   stepEffects(dt, t);
   watchSpeed(dt);

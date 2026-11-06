@@ -28,6 +28,12 @@ MAX_DESIGN_PARTS = 40
 MAX_DESIGNS = 200
 MAX_PARTS_TOTAL = 12000
 PARTS_PER_CONTINUE = 10
+# ---- tidy building rules (1.4.1) ----------------------------------------------------------
+PLOT_RADIUS = 10.0        # a place fits in its own plot, about 20 x 20, around its centre
+PLOT_MIN = 4.0            # the smallest plot a place gets
+MAX_PLACE_HEIGHT = 22.0   # nothing taller than this
+PLOT_GAP = 3.0            # open ground kept between neighbouring plots (room to walk and for paths)
+TIDY_VERSION = 1
 RESHAPE_COOLDOWN_MIN = 360   # game minutes between changes to the world's look
 HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
 ENV_DEFAULT = {"weather": "clear", "sky": "#3f6fd8", "horizon": "#cdd8ff", "ground": "#aaa4ea",
@@ -189,6 +195,112 @@ def expand_parts(raw, designs, limit):
     return out, used, unknown
 
 
+# ---------------------------------------------------------------------- plots and gravity (1.4.1)
+def _half_extents(p):
+    """Half the width/depth a part covers on the ground, allowing for its rotation."""
+    a = math.radians(p.get("rot", 0) or 0)
+    c, s = abs(math.cos(a)), abs(math.sin(a))
+    hw, hd = p["w"] / 2.0, p["d"] / 2.0
+    return hw * c + hd * s, hw * s + hd * c
+
+
+def _box(p):
+    ex, ez = _half_extents(p)
+    return [p["dx"] - ex, p["dx"] + ex, p["dz"] - ez, p["dz"] + ez, p["y"], p["y"] + p["h"]]
+
+
+def footprint(parts):
+    """How far a group of parts reaches from its centre: the plot 'radius' it needs (a square)."""
+    r = 0.0
+    for p in parts:
+        ex, ez = _half_extents(p)
+        r = max(r, abs(p["dx"]) + ex, abs(p["dz"]) + ez)
+    return round(r, 2)
+
+
+def recentre(parts):
+    """Shift parts so the middle of what they cover is at (0, 0). Returns the shift (cx, cz)."""
+    if not parts:
+        return 0.0, 0.0
+    bs = [_box(p) for p in parts]
+    cx = (min(b[0] for b in bs) + max(b[1] for b in bs)) / 2.0
+    cz = (min(b[2] for b in bs) + max(b[3] for b in bs)) / 2.0
+    for p in parts:
+        p["dx"], p["dz"] = round(p["dx"] - cx, 2), round(p["dz"] - cz, 2)
+    return cx, cz
+
+
+def fit_parts(parts, radius=PLOT_RADIUS, max_h=MAX_PLACE_HEIGHT):
+    """Shrink a group of parts evenly (its shape stays the same) so it fits in its plot and under
+    the height limit. Returns the scale used (1.0 = it already fitted)."""
+    if not parts:
+        return 1.0
+    r = footprint(parts)
+    top = max(p["y"] + p["h"] for p in parts)
+    k = min(1.0, radius / r if r > 0 else 1.0, max_h / top if top > 0 else 1.0)
+    if k < 0.999:
+        for p in parts:
+            for key in ("dx", "dz", "y"):
+                p[key] = round(p[key] * k, 2)
+            for key in ("w", "h", "d"):
+                p[key] = max(0.1, round(p[key] * k, 2))
+    return k
+
+
+def _touch(a, b, eps=0.12):
+    return (a[0] < b[1] + eps and b[0] < a[1] + eps and a[2] < b[3] + eps and b[2] < a[3] + eps
+            and a[4] <= b[5] + eps and b[4] <= a[5] + eps)
+
+
+def _over(a, b, eps=0.05):
+    return a[0] < b[1] - eps and b[0] < a[1] - eps and a[2] < b[3] - eps and b[2] < a[3] - eps
+
+
+def settle(parts, base=()):
+    """Gravity. Parts that touch each other hold together; a group that touches neither the ground
+    nor anything already standing (base) is floating, so it drops, as one piece, onto the ground
+    or the highest thing below it. Parts set into or hanging from something stay put.
+    Returns how many parts dropped."""
+    n = len(parts)
+    if not n:
+        return 0
+    solid = [_box(q) for q in base]
+    boxes = [_box(p) for p in parts]
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _touch(boxes[i], boxes[j]):
+                parent[find(i)] = find(j)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    standing, floating = [], []
+    for g in groups.values():
+        held = any(boxes[i][4] <= 0.05 or any(_touch(boxes[i], q) for q in solid) for i in g)
+        (standing if held else floating).append(g)
+    for g in standing:
+        solid.extend(boxes[i] for i in g)
+    floating.sort(key=lambda g: min(boxes[i][4] for i in g))
+    moved = 0
+    for g in floating:
+        drop = min(boxes[i][4] - max([0.0] + [q[5] for q in solid if _over(boxes[i], q) and q[5] <= boxes[i][4] + 0.01])
+                   for i in g)
+        if drop > 0.05:
+            for i in g:
+                parts[i]["y"] = round(max(0.0, parts[i]["y"] - drop), 2)
+                boxes[i][4] -= drop
+                boxes[i][5] -= drop
+            moved += len(g)
+        solid.extend(boxes[i] for i in g)
+    return moved
+
+
 def validate_shader(code):
     """Check a god's shader body against the safety rules. Returns (clean code, None) or (None, reason).
     It's only a function body: no inputs from outside except the ones given, no textures, no files,
@@ -284,7 +396,7 @@ class World:
             "agents": agents, "structures": {}, "rev": 0,
             "designs": {}, "environment": dict(ENV_DEFAULT),
             "graphics": json.loads(json.dumps(GRAPHICS_DEFAULT)), "shaders": {},
-            "requests": [], "next_request": 0,
+            "requests": [], "next_request": 0, "tidy_version": TIDY_VERSION,
             "events": [], "diaries": [], "searches": [], "talks": [],
         }
 
@@ -315,6 +427,64 @@ class World:
         for st in s["structures"].values():
             if len(st.get("parts", [])) >= MAX_PARTS_PER_PLACE:
                 st["finished"] = True
+        if int(s.get("tidy_version", 0)) < TIDY_VERSION:
+            self.tidy()
+
+    def tidy(self):
+        """One-time clean-up for worlds built before the 1.4.1 building rules: every place is shrunk
+        (evenly) to fit its own plot, floating parts drop, and places are moved apart so none overlap.
+        The old world is kept in data/world_before_tidy.json."""
+        s = self.state
+        structs = list(s["structures"].values())
+        if structs:
+            backup = os.path.join(self.data_dir, "world_before_tidy.json")
+            if not os.path.exists(backup):
+                with open(backup, "w", encoding="utf-8") as f:
+                    json.dump(s, f, ensure_ascii=False)
+        for st in structs:
+            cx, cz = recentre(st["parts"])
+            st["x"], st["z"] = st["x"] + cx, st["z"] + cz
+            fit_parts(st["parts"])
+            settle(st["parts"])
+            st["parts"].sort(key=lambda p: p["y"])
+            st["plot"] = round(max(footprint(st["parts"]), PLOT_MIN), 2)
+        s["structures"] = {}
+        moved = 0
+        for st in sorted(structs, key=lambda t: -len(t["parts"])):
+            site = (self.find_site(0.0, 0.0, st["plot"]) if not s["structures"]
+                    else self.find_site(st["x"], st["z"], st["plot"]))
+            while site is None and st["plot"] > PLOT_MIN:          # no room: make this one smaller
+                fit_parts(st["parts"], st["plot"] * 0.8, MAX_PLACE_HEIGHT)
+                st["plot"] = round(max(footprint(st["parts"]), PLOT_MIN), 2)
+                site = self.find_site(st["x"], st["z"], st["plot"])
+            if site is None:
+                site = (st["x"], st["z"])
+            if self.dist(site[0], site[1], st["x"], st["z"]) > 0.5:
+                moved += 1
+            st["x"], st["z"] = site
+            s["structures"][st["id"]] = st
+        for a in s["agents"].values():
+            pr = a.get("project")
+            if pr:
+                st = self.find_structure(pr["name"])
+                fit_parts(pr["remaining"])
+                pr.setdefault("plot", PLOT_RADIUS)
+                if st:
+                    pr["x"], pr["z"] = st["x"], st["z"]
+                else:
+                    site = self.find_site(pr["x"], pr["z"], pr["plot"], skip=pr)
+                    if site:
+                        pr["x"], pr["z"] = site
+        s["tidy_version"] = TIDY_VERSION
+        s["rev"] = int(s.get("rev", 0)) + 1
+        if structs:
+            self.add_event(None, "world", f"Olympus was tidied: {moved} place(s) moved so none overlap, "
+                           "oversized ones shrunk to fit their plots, and floating pieces settled.")
+            for a in s["agents"].values():
+                self.remember(a["id"], "The Watcher tidied Olympus: places were moved apart so none overlap, big ones "
+                              "were shrunk to fit a plot about 20 x 20, and floating pieces dropped. From now on every "
+                              "new place gets its own clear plot and parts must rest on the ground or on other parts.",
+                              "world")
 
     def save(self):
         with self.lock:
@@ -422,7 +592,7 @@ class World:
         if to:
             s = self.find_structure(to)
             if s:
-                return s["x"], s["z"] + 2.5, s["name"]
+                return s["x"], s["z"] + (s.get("plot") or 2.5) + 1.0, s["name"]
             a = self.find_agent(to)
             if a:
                 return a["x"] + 1.5, a["z"] + 1.5, a["name"]
@@ -435,16 +605,47 @@ class World:
             return x, z, f"({x:.0f}, {z:.0f})"
         return None
 
-    def free_site(self, near_x, near_z, min_gap=11.0):
-        """Find an open spot near a point, away from other structures."""
-        rnd = random.Random(int(self.state["game_minutes"]) + len(self.state["structures"]))
-        for radius in (6, 10, 14, 18, 24, 30):
-            for _ in range(24):
-                ang = rnd.random() * 2 * math.pi
-                x, z = self.clamp_xy(near_x + math.cos(ang) * radius, near_z + math.sin(ang) * radius)
-                if all(self.dist(x, z, s["x"], s["z"]) >= min_gap for s in self.state["structures"].values()):
+    def plots(self, skip=None):
+        """Every place's plot, and every planned project's, as (x, z, radius)."""
+        out = []
+        names = set()
+        for st in self.state["structures"].values():
+            names.add(st["name"].lower())
+            if st is skip:
+                continue
+            out.append((st["x"], st["z"], st.get("plot") or max(footprint(st["parts"]), PLOT_MIN)))
+        for a in self.state["agents"].values():
+            pr = a.get("project")
+            if pr and pr["name"].lower() not in names and pr is not skip:
+                out.append((pr["x"], pr["z"], pr.get("plot", PLOT_RADIUS)))
+        return out
+
+    def site_free(self, x, z, r, skip=None):
+        lim = self.half - 0.5
+        if abs(x) + r > lim or abs(z) + r > lim:
+            return False
+        return all(abs(x - px) >= r + pr + PLOT_GAP or abs(z - pz) >= r + pr + PLOT_GAP
+                   for px, pz, pr in self.plots(skip))
+
+    def find_site(self, near_x, near_z, r, skip=None):
+        """The open plot (radius r) nearest to a point, or None when Olympus has no room left."""
+        lim = max(0.0, self.half - 0.5 - r)
+        near_x, near_z = max(-lim, min(lim, near_x)), max(-lim, min(lim, near_z))
+        if self.site_free(near_x, near_z, r, skip):
+            return round(near_x, 1), round(near_z, 1)
+        for ring in range(1, int(self.half * 3)):
+            n = max(8, int(2 * math.pi * ring))
+            off = ring * 0.618
+            for k in range(n):
+                ang = 2 * math.pi * k / n + off
+                x, z = near_x + math.cos(ang) * ring, near_z + math.sin(ang) * ring
+                if self.site_free(x, z, r, skip):
                     return round(x, 1), round(z, 1)
-        return self.clamp_xy(near_x + 8, near_z + 8)
+        return None
+
+    def free_site(self, near_x, near_z, min_gap=11.0):
+        """Kept for older callers: an open spot for a small place near a point."""
+        return self.find_site(near_x, near_z, PLOT_MIN) or self.clamp_xy(near_x, near_z)
 
     def total_parts(self):
         return sum(len(s["parts"]) for s in self.state["structures"].values())
@@ -517,9 +718,31 @@ class World:
         if not t:
             return "You weren't sure where to go, so you stayed put."
         x, z, label = t
+        if self.dist(a["x"], a["z"], x, z) < 3.0:
+            return f"You're already at {label}. Do something here, or go somewhere new."
         self.walk_to(a, x, z)
         self.add_event(a["id"], "move", f"{a['name']} walks toward {label}.")
         return f"You started walking toward {label}."
+
+    def _act_observe(self, a, action):
+        """Look around: who's nearby and what they're doing, and what's here."""
+        bits = []
+        here = self.nearest_structure(a["x"], a["z"], within=12)
+        if here:
+            bits.append(f"You're by '{here['name']}' ({len(here['parts'])} parts"
+                        + (", finished" if here.get("finished") else "") + ").")
+        for o in self.state["agents"].values():
+            if o["id"] == a["id"]:
+                continue
+            d = self.dist(a["x"], a["z"], o["x"], o["z"])
+            if d <= HEAR_RANGE:
+                doing = o["status"] + (f", working on '{o['project']['name']}'" if o.get("project") else "")
+                bits.append(f"{o['name']} is {round(d)} away ({doing}).")
+        if len(bits) <= (1 if here else 0):
+            bits.append("Nobody else is nearby.")
+        return "You looked around. " + " ".join(bits) + " Watching won't change anything; act on what you saw."
+
+    _act_look = _act_watch = _act_look_around = _act_observe
 
     def _act_wander(self, a, action):
         ang = random.random() * 2 * math.pi
@@ -568,14 +791,31 @@ class World:
                                    "day": st["day"], "time": st["time"]})
                 o["inbox"] = o["inbox"][-6:]
 
-    def _site_for(self, a, action, existing):
+    def _site_for(self, a, action, existing, r):
         if existing:
             return existing["x"], existing["z"]
         if "x" in action and "z" in action:
             x = _num(action.get("x"), a["x"], -self.half, self.half)
             z = _num(action.get("z"), a["z"], -self.half, self.half)
-            return self.clamp_xy(x, z)
-        return self.free_site(a["x"], a["z"])
+        else:
+            x, z = a["x"], a["z"]
+        return self.find_site(x, z, r)
+
+    def _fit_addition(self, st, parts):
+        """New parts for an existing place: grow its plot if the neighbours leave room, else shrink
+        the new parts evenly so they fit. Then they settle onto what's already there."""
+        need = footprint(st["parts"] + parts)
+        plot = st.get("plot") or max(footprint(st["parts"]), PLOT_MIN)
+        if need > plot:
+            want = min(PLOT_RADIUS, need)
+            if self.site_free(st["x"], st["z"], want, skip=st):
+                plot = want
+            st["plot"] = round(plot, 2)
+            if need > plot:
+                fit_parts(parts, plot, MAX_PLACE_HEIGHT)
+        if max((p["y"] + p["h"] for p in parts), default=0) > MAX_PLACE_HEIGHT:
+            fit_parts(parts, PLOT_RADIUS, MAX_PLACE_HEIGHT)
+        settle(parts, st["parts"])
 
     def _act_build(self, a, action):
         name = clean_text(action.get("name") or action.get("structure") or "", 60)
@@ -597,26 +837,40 @@ class World:
         if existing is not None and existing.get("finished"):
             return (f"'{existing['name']}' is finished ({len(existing['parts'])} parts, the most one place can hold). "
                     "Nobody can add to it. Make something NEW: a different place, an invention, or change the world's look.")
+        plot = None
         if existing is not None:
             room = MAX_PARTS_PER_PLACE - len(existing["parts"])
             parts = parts[:max(0, room)]
-        sx, sz = self._site_for(a, action, existing)
-        if self.dist(a["x"], a["z"], sx, sz) > REACH + 6:
+        else:
+            recentre(parts)
+            fit_parts(parts)
+            plot = max(footprint(parts), PLOT_MIN)
+        site = self._site_for(a, action, existing, plot)
+        if site is None:
+            return ("Olympus has no open land left for a new place. Add to a place that isn't finished, "
+                    "or take down one of your own to make room.")
+        sx, sz = site
+        if self.dist(a["x"], a["z"], sx, sz) > REACH + 6 + (plot or 0):
             fixed = dict(action, x=sx, z=sz)
-            self.walk_to(a, sx + 2, sz + 3, pending=fixed)
+            self.walk_to(a, sx + 2, sz + (plot or 0) + 2, pending=fixed)
             return f"You head to the building site for '{name}'."
-        s = self._place(a, name, clean_text(action.get("purpose"), 200), sx, sz, parts, existing)
+        if existing is not None:
+            self._fit_addition(existing, parts)
+        else:
+            settle(parts)
+        s = self._place(a, name, clean_text(action.get("purpose"), 200), sx, sz, parts, existing, plot)
         self._count_uses(used)
         extra = f" using {', '.join(used)}" if used else ""
         if unknown:
             extra += f" (no invention called {', '.join(unknown)} exists)"
         return f"You built {len(parts)} part(s) of '{s['name']}'{extra}."
 
-    def _place(self, a, name, purpose, sx, sz, parts, existing):
+    def _place(self, a, name, purpose, sx, sz, parts, existing, plot=None):
         if existing is None:
             sid = uuid.uuid4().hex[:8]
             existing = {"id": sid, "name": name, "purpose": purpose or "", "builder": a["id"],
                         "x": round(sx, 2), "z": round(sz, 2), "parts": [],
+                        "plot": round(plot if plot else max(footprint(parts), PLOT_MIN), 2),
                         "contributors": [a["id"]], "created": self.stamp()}
             self.state["structures"][sid] = existing
             self.add_event(a["id"], "found", f"{a['name']} began building '{name}'.")
@@ -650,11 +904,22 @@ class World:
                 return f"'{existing['name']}' is already finished. Design something new instead."
             if existing:
                 sx, sz = existing["x"], existing["z"]
+                self._fit_addition(existing, parts)
+                plot = existing.get("plot", PLOT_RADIUS)
             else:
-                sx, sz = self.free_site(a["x"], a["z"])
+                recentre(parts)
+                fit_parts(parts)
+                settle(parts)
+                plot = max(footprint(parts), PLOT_MIN)
+                site = self.find_site(a["x"], a["z"], plot)
+                if site is None:
+                    return ("Olympus has no open land left for a new place. Add to a place that isn't finished, "
+                            "or take down one of your own to make room.")
+                sx, sz = site
+            parts.sort(key=lambda p: p["y"])            # built from the ground up
             a["project"] = {"name": name, "idea": clean_text(idea, 200),
                             "purpose": clean_text(blueprint.get("purpose"), 200),
-                            "x": sx, "z": sz, "remaining": parts, "total": len(parts)}
+                            "x": sx, "z": sz, "plot": round(plot, 2), "remaining": parts, "total": len(parts)}
             self.add_event(a["id"], "plan", f"{a['name']} designed '{name}' ({len(parts)} parts).")
             return f"You designed '{name}' with {len(parts)} parts. Use continue_project to build it."
 
@@ -674,7 +939,7 @@ class World:
         if self.total_parts() + len(batch) > MAX_PARTS_TOTAL:
             return "The world is too full to build more right now."
         existing = self.find_structure(pr["name"])
-        s = self._place(a, pr["name"], pr.get("purpose"), pr["x"], pr["z"], batch, existing)
+        s = self._place(a, pr["name"], pr.get("purpose"), pr["x"], pr["z"], batch, existing, pr.get("plot"))
         if not pr["remaining"]:
             a["project"] = None
             self.add_event(a["id"], "finish", f"{a['name']} finished '{s['name']}'.")

@@ -24,7 +24,9 @@ yourselves, you can ask them for it.
 Stay in character. Be specific and concrete. Reply with ONE JSON object and nothing else."""
 
 PARTS_HELP = """A part: {{"shape":"box","dx":0,"y":0,"dz":0,"w":4,"h":3,"d":1,"material":"stone","rot":0,"color":"#c0a060","glow":false}}
-  dx/dz = offset from the centre, y = height of the part's bottom (0 = ground), w/h/d = size (0.1 to 16), rot = turn in degrees.
+  dx/dz = offset from the place's centre (a place's plot reaches about 10 each way), y = height of the part's bottom
+  (0 = ground), w/h/d = size (0.1 to 16), rot = turn in degrees. Nothing goes higher than 22.
+  Build from the ground up: every part must stand on the ground or rest on/against another part; floating parts fall.
   shapes: {shapes}  (arch = wall with a doorway, stairs = steps rising toward -z, wedge = ramp/sloped roof, ring = upright hoop, tree/bush = plants)
   materials: {materials}. "color" (optional, any #rrggbb) tints it. "glow":true makes it shine at night.
   An invention can be a part too: {{"design":"<invention name>","dx":0,"y":0,"dz":0,"scale":1,"rot":0}}"""
@@ -32,8 +34,9 @@ PARTS_HELP = """A part: {{"shape":"box","dx":0,"y":0,"dz":0,"w":4,"h":3,"d":1,"m
 ACTIONS_HELP = """ACTIONS (choose exactly one):
 {{"action":"move","to":"<place or being name>"}}   or   {{"action":"move","x":0,"z":0}}
 {{"action":"say","to":"<name or empty for everyone nearby>","text":"..."}}
-{{"action":"build","name":"<place name>","purpose":"...","x":0,"z":0,"parts":[ up to {maxparts} parts ]}}
-    use an existing place's name to add to it (anyone may add to any place); omit x,z to let the world pick an open spot
+{{"action":"build","name":"<place name>","purpose":"...","parts":[ up to {maxparts} parts ]}}
+    a NEW name starts a new place on its own clear plot near you (about 20 x 20, with open ground around it);
+    use an existing place's name to add to it (anyone may add to any place that isn't finished)
 {{"action":"plan_project","idea":"<something big you want to make>"}}   (designs a large detailed build you then construct over time)
 {{"action":"continue_project"}}   (build the next section of your project)
 {{"action":"invent","idea":"<a reusable object, e.g. an ornate column, a fountain, a lamp post>"}}   (designs it once; then anyone can build it by name)
@@ -429,7 +432,9 @@ class Engine:
                 f"Design it as up to {MAX_PARTS_PER_PROJECT} 3D parts around a centre point. Make it detailed and beautiful: "
                 "think like an architect - foundation and steps, walls with arches for doorways, columns, "
                 "a roof, trim, windows of glass, lamps that glow at night, plants and paths around it. "
-                "Units are roughly metres; a god is about 2 tall. Offsets can reach 30 from the centre.\n"
+                "Units are roughly metres; a god is about 2 tall. It gets its own plot: keep offsets within 10 of the "
+                "centre (a 20 x 20 footprint) and the top below 22. Build from the ground up: every part stands on the "
+                "ground or rests on another part (floating parts fall). Spread it in both directions, not in one long row.\n"
                 + parts_help() + "\n"
                 'Reply as JSON: {"name":"...","purpose":"why it exists","parts":[ ... ]}')
         try:
